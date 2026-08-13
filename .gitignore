@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+.env
+.env.*
+!.env.example
+
+# Run artifacts that must never reach the repository.
+traces/
+artifacts/
+*.sqlite
+*.sqlite3
+uploads/
+exports/

@@ -4,7 +4,10 @@ Backend API, job orchestration, deterministic engines, dan integrasi OASIS untuk
 
 ## Status
 
-Repository ini baru diinisialisasi. Belum ada source code layanan. Desain teknis dan batas penggunaan OASIS tersedia di repository [Docs](https://github.com/NextGen-Manager/Docs).
+Fondasi Fase 0 tersedia pada branch `dev`: aplikasi FastAPI, konfigurasi environment,
+PostgreSQL, Redis, Alembic, correlation ID, bentuk error stabil, health/readiness,
+Docker Compose, test dasar, dan CI. Domain bisnis serta integrasi OASIS belum masuk
+jalur aplikasi.
 
 ## Tanggung jawab repository
 
@@ -60,4 +63,45 @@ tests/
 
 ## Menjalankan layanan
 
-Belum tersedia. Ketika scaffold dibuat, README ini harus memuat setup lokal, migrasi database, worker, seed data, test, lint, serta seluruh environment variables tanpa menyertakan secret asli.
+Prasyarat: Docker Desktop, atau Python 3.11 dan `uv` untuk menjalankan tanpa container.
+
+### Docker Compose
+
+```bash
+docker compose up --build -d
+docker compose exec api uv run alembic upgrade head
+```
+
+API tersedia di `http://localhost:8000`. Pemeriksaan:
+
+```bash
+curl http://localhost:8000/v1/health
+curl http://localhost:8000/v1/ready
+```
+
+Hentikan service tanpa menghapus volume database:
+
+```bash
+docker compose down
+```
+
+### Lokal
+
+```bash
+uv sync --all-groups
+copy .env.example .env
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload
+```
+
+### Quality checks
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+uv run pytest
+```
+
+Jangan mengisi atau melakukan commit terhadap `.env`. Kredensial provider baru
+dibutuhkan ketika spike OASIS dijalankan.
