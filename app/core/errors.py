@@ -69,6 +69,19 @@ class ValidationFailedError(AppError):
     message = "Ada isian yang belum benar."
 
 
+class ConflictError(AppError):
+    status_code = 409
+    code = "CONFLICT"
+    message = "Data tersebut sudah digunakan."
+
+
+class RateLimitError(AppError):
+    status_code = 429
+    code = "RATE_LIMITED"
+    message = "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi."
+    retryable = True
+
+
 def _render(
     status_code: int,
     code: str,
