@@ -75,6 +75,32 @@ class ConflictError(AppError):
     message = "Data tersebut sudah digunakan."
 
 
+class EducationGateError(AppError):
+    """F-09: education prerequisites are enforced at the API, not just in the UI."""
+
+    status_code = 409
+    code = "EDUCATION_PREREQUISITE_NOT_MET"
+    message = "Selesaikan modul edukasi prasyarat sebelum menjalankan analisis."
+
+
+class EducationContentUnavailableError(AppError):
+    """F-09 cannot pass when no reviewed prerequisite content exists."""
+
+    status_code = 503
+    code = "EDUCATION_CONTENT_UNAVAILABLE"
+    message = "Modul edukasi prasyarat belum tersedia. Coba lagi setelah materi diterbitkan."
+    retryable = True
+
+
+class EducationContentInvalidError(AppError):
+    """Published content without a knowledge check cannot satisfy F-09."""
+
+    status_code = 503
+    code = "EDUCATION_CONTENT_INVALID"
+    message = "Modul edukasi belum memiliki kuis yang valid. Coba lagi setelah materi diperbaiki."
+    retryable = True
+
+
 class RateLimitError(AppError):
     status_code = 429
     code = "RATE_LIMITED"

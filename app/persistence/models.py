@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -16,9 +17,14 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import TypeEngine
 
 from app.persistence.database import Base
+
+# JSONB on PostgreSQL, plain JSON elsewhere so the same models run under SQLite in tests.
+JsonType: TypeEngine[object] = JSON().with_variant(postgresql.JSONB(), "postgresql")
 
 
 def utc_now() -> datetime:
@@ -172,10 +178,25 @@ class TransactionItem(Base):
     line_total_idr: Mapped[int] = mapped_column(BigInteger)
 
 
+class InputSnapshot(Base):
+    """Frozen analysis input.
+
+    Written once when a run is created and never updated, so a report can always
+    be traced back to exactly what the user submitted.
+    """
+
+    __tablename__ = "input_snapshots"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    payload: Mapped[dict[str, object]] = mapped_column(JsonType)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class AnalysisRun(Base):
     __tablename__ = "analysis_runs"
     __table_args__ = (
         CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="ck_analysis_score"),
+        UniqueConstraint("user_id", "idempotency_key", name="uq_analysis_user_idempotency"),
         Index("ix_analysis_user_created", "user_id", "created_at"),
     )
 
@@ -188,6 +209,132 @@ class AnalysisRun(Base):
     interpretation: Mapped[str | None] = mapped_column(String(120))
     rule_version: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    business_type: Mapped[str] = mapped_column(String(32), default="food_stall")
+    current_stage: Mapped[str] = mapped_column(String(32), default="queued")
+    completed_stages: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    skipped_stages: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    warnings: Mapped[list[dict[str, object]]] = mapped_column(JsonType, default=list)
+    input_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("input_snapshots.id", ondelete="RESTRICT")
+    )
+    evidence_snapshot_version: Mapped[str | None] = mapped_column(String(80))
+    correlation_id: Mapped[UUID] = mapped_column(Uuid, index=True, default=uuid4)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+
+
+class EvidenceItem(Base):
+    __tablename__ = "evidence_items"
+    __table_args__ = (
+        Index("ix_evidence_items_run_metric", "analysis_run_id", "metric"),
+        Index("ix_evidence_items_metric_observed", "metric", "observed_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    metric: Mapped[str] = mapped_column(String(80))
+    value: Mapped[int] = mapped_column(BigInteger)
+    unit: Mapped[str] = mapped_column(String(40))
+    geography: Mapped[dict[str, object]] = mapped_column(JsonType)
+    category_mapping_version: Mapped[str | None] = mapped_column(String(80))
+    source: Mapped[str] = mapped_column(String(120))
+    source_url: Mapped[str | None] = mapped_column(String(500))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    quality: Mapped[dict[str, object]] = mapped_column(JsonType)
+    limitations: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AnalysisReportRecord(Base):
+    __tablename__ = "analysis_reports"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), unique=True
+    )
+    report_version: Mapped[str] = mapped_column(String(40))
+    payload: Mapped[dict[str, object]] = mapped_column(JsonType)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EducationModule(Base):
+    __tablename__ = "education_modules"
+    __table_args__ = (
+        CheckConstraint(
+            "passing_score_percent BETWEEN 0 AND 100", name="ck_education_passing_score"
+        ),
+        Index("ix_education_modules_published", "published_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    slug: Mapped[str] = mapped_column(String(80), unique=True)
+    title: Mapped[str] = mapped_column(String(180))
+    summary: Mapped[str] = mapped_column(Text)
+    topic: Mapped[str] = mapped_column(String(80))
+    body: Mapped[str | None] = mapped_column(Text)
+    content_version: Mapped[str] = mapped_column(String(40))
+    business_types: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    estimated_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    passing_score_percent: Mapped[int] = mapped_column(Integer, default=70)
+    is_required: Mapped[bool] = mapped_column(Boolean, default=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class EducationQuestion(Base):
+    __tablename__ = "education_questions"
+    __table_args__ = (
+        UniqueConstraint("module_id", "position", name="uq_education_question_position"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    module_id: Mapped[UUID] = mapped_column(
+        ForeignKey("education_modules.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    options: Mapped[list[str]] = mapped_column(JsonType)
+    correct_index: Mapped[int] = mapped_column(Integer)
+    explanation: Mapped[str | None] = mapped_column(Text)
+
+
+class EducationProgress(Base):
+    __tablename__ = "education_progress"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "module_id",
+            "content_version",
+            name="uq_education_progress_user_module_version",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    module_id: Mapped[UUID] = mapped_column(
+        ForeignKey("education_modules.id", ondelete="CASCADE"), index=True
+    )
+    # Progress points at the content version it was earned against, so an audit
+    # can tell whether a completion still refers to the material now published.
+    content_version: Mapped[str] = mapped_column(String(40))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    correct_answers: Mapped[int] = mapped_column(Integer, default=0)
+    total_questions: Mapped[int] = mapped_column(Integer, default=0)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class AuditEvent(Base):
