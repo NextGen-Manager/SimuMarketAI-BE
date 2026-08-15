@@ -18,6 +18,7 @@ benchmark in `Docs/docs/14` both remain open.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from app.domain.agents import (
 )
 from app.integrations.oasis.council_runtime import ACTION_DO_NOTHING, ACTION_LIKE_POST
 from app.integrations.oasis.live import (
+    CamelCouncilRuntime,
     LiveOasisAdapter,
     _chosen_action,
     _usage_tokens,
@@ -119,6 +121,14 @@ def test_profiles_invent_no_demographic_attribute() -> None:
         assert profile["mbti"] == "N/A"
         assert profile["persona"]
 
+    persona_profiles = [
+        profile for profile in profiles if profile["username"].startswith("persona-")
+    ]
+    for archetype in _request().cohort.allocation:
+        matching = [profile for profile in persona_profiles if archetype in profile["persona"]]
+        assert matching, f"profile live tidak membawa archetype {archetype}"
+    assert len({profile["persona"] for profile in persona_profiles}) == 4
+
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
@@ -158,6 +168,107 @@ def test_the_action_taken_is_read_from_the_tool_call_not_from_prose() -> None:
     assert _chosen_action({"tool_calls": []}) == ACTION_DO_NOTHING
     assert _chosen_action({}) == ACTION_DO_NOTHING
     assert _chosen_action(None) == ACTION_DO_NOTHING
+
+
+class _ConcurrencyTracker:
+    def __init__(self) -> None:
+        self.active = 0
+        self.maximum = 0
+
+
+class _FakeAgentEnvironment:
+    def __init__(self, prompt: str) -> None:
+        self._prompt = prompt
+
+    async def to_text_prompt(self) -> str:
+        return self._prompt
+
+
+class _FakeAgentResponse:
+    def __init__(self) -> None:
+        self.info = {
+            "usage": {"total_tokens": 10},
+            "tool_calls": [_ToolCall(ACTION_LIKE_POST)],
+        }
+
+
+class _FakeAgent:
+    def __init__(self, tracker: _ConcurrencyTracker, prompt: str) -> None:
+        self._tracker = tracker
+        self.env = _FakeAgentEnvironment(prompt)
+
+    async def perform_action_by_llm(self) -> _FakeAgentResponse:
+        self._tracker.active += 1
+        self._tracker.maximum = max(self._tracker.maximum, self._tracker.active)
+        try:
+            await asyncio.sleep(0.01)
+            return _FakeAgentResponse()
+        finally:
+            self._tracker.active -= 1
+
+
+class _FakeGraph:
+    def __init__(self, agents: list[_FakeAgent]) -> None:
+        self._agents = agents
+
+    def get_agent(self, index: int) -> _FakeAgent:
+        return self._agents[index]
+
+
+class _FakePlatform:
+    async def update_rec_table(self) -> None:
+        return None
+
+
+class _FakeEnvironment:
+    platform = _FakePlatform()
+
+
+async def test_social_actions_honor_concurrency_and_record_exposure(tmp_path: Path) -> None:
+    request = _request().model_copy(
+        update={"budget": _request().budget.model_copy(update={"concurrency_limit": 2})}
+    )
+    settings = Settings(
+        environment="test",
+        jwt_secret="test-secret-with-at-least-thirty-two-characters",
+        oasis_trace_root=str(tmp_path),
+    )
+    manifest = build_manifest(
+        settings,
+        adapter_id="oasis-live",
+        environment="concurrency-test",
+        cohort=request.cohort,
+        budget=request.budget,
+        trace=TraceArtifact(object_key=str(tmp_path / "concurrency-test.db"), retention_days=30),
+        evidence_snapshot_version="evidence-snapshot-fixture-v1",
+        snapshot_hash="0" * 64,
+    )
+    runtime = CamelCouncilRuntime(
+        api_key="unused",
+        model_id="gemini-3.1-flash-lite",
+        request=request,
+        manifest=manifest,
+        roster=build_roster(request),
+    )
+    marker = "[simumarket-stimulus:test]"
+    tracker = _ConcurrencyTracker()
+    agents = [_FakeAgent(tracker, marker) for _ in range(5)]
+    agents[-1] = _FakeAgent(tracker, "feed tanpa stimulus")
+    runtime._graph = _FakeGraph(agents)
+    runtime._env = _FakeEnvironment()
+    runtime._stimulus_marker = marker
+
+    results = await runtime.step(tuple(range(5)), round_index=1)
+
+    assert tracker.maximum == 2
+    assert [results[index].observed_stimulus for index in range(5)] == [
+        True,
+        True,
+        True,
+        True,
+        False,
+    ]
+    assert all(result.tokens == 10 for result in results.values())
 
 
 async def test_an_existing_trace_path_is_refused(tmp_path: Path) -> None:

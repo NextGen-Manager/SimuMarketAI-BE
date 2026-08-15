@@ -79,6 +79,7 @@ def reduce_persona_ballots(
     rounds: int,
     baseline: Sequence[PersonaBallot] = (),
     reactions: Mapping[str, int] | None = None,
+    social_exposure_complete: bool = True,
     max_quotes: int = 4,
 ) -> CustomerSimulationResult:
     """Count the final ballots, the observed reactions, and the opinion shifts.
@@ -136,6 +137,13 @@ def reduce_persona_ballots(
         for ballot in ballots[:max_quotes]
     ]
 
+    limitations = list(SIMULATION_LIMITATIONS)
+    if not social_exposure_complete:
+        limitations.append(
+            "Tidak seluruh persona menerima stimulus melalui feed sosial; "
+            "reaksi hanya dihitung dari exposure yang terverifikasi."
+        )
+
     return CustomerSimulationResult(
         cohort_version=cohort_version,
         cohort_size=cohort_size,
@@ -148,5 +156,5 @@ def reduce_persona_ballots(
         objections=objections,
         acceptable_price_band=band,
         quotes=quotes,
-        limitations=list(SIMULATION_LIMITATIONS),
+        limitations=limitations,
     )

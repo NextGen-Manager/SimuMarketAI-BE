@@ -20,8 +20,8 @@ from app.domain.agents import (
     SimulationRequest,
 )
 
-PROMPT_VERSION = "oasis-council-v1"
-PROFILE_VERSION = "council-profiles-v1"
+PROMPT_VERSION = "oasis-council-v2"
+PROFILE_VERSION = "council-profiles-v2"
 
 SHARED_MANDATE = (
     "Kamu adalah agent sintetis dalam sistem pendukung keputusan. "
@@ -40,6 +40,42 @@ class CouncilMember:
     mandate: str
     allowed_actions: tuple[str, ...]
     archetype: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaArchetypeProfile:
+    """A behavioural hypothesis, never a claim about local demography."""
+
+    focus: str
+    decision_rule: str
+
+
+PERSONA_ARCHETYPE_PROFILES: dict[str, PersonaArchetypeProfile] = {
+    "budget_driven": PersonaArchetypeProfile(
+        focus="Prioritaskan keterjangkauan, kejelasan porsi, dan nilai yang diterima.",
+        decision_rule=(
+            "Keberatan utama muncul ketika manfaat yang terlihat tidak cukup menjelaskan harga."
+        ),
+    ),
+    "convenience_driven": PersonaArchetypeProfile(
+        focus="Prioritaskan kecepatan layanan, kemudahan akses, dan kanal pemesanan.",
+        decision_rule=(
+            "Keberatan utama muncul ketika proses membeli terlihat merepotkan atau lambat."
+        ),
+    ),
+    "quality_driven": PersonaArchetypeProfile(
+        focus="Prioritaskan kualitas produk, konsistensi, dan kejelasan proposisi nilai.",
+        decision_rule=(
+            "Keberatan utama muncul ketika kualitas yang dijanjikan tidak dapat dibedakan."
+        ),
+    ),
+    "social_family_driven": PersonaArchetypeProfile(
+        focus="Prioritaskan kecocokan untuk makan bersama dan kebutuhan kelompok.",
+        decision_rule=(
+            "Keberatan utama muncul ketika tawaran sulit dinikmati atau disepakati bersama."
+        ),
+    ),
+}
 
 
 MARKET_COUNCIL: tuple[CouncilMember, ...] = (
@@ -135,6 +171,9 @@ def persona_council(request: SimulationRequest) -> tuple[CouncilMember, ...]:
     """
     members: list[CouncilMember] = []
     for archetype, count in request.cohort.allocation.items():
+        profile = PERSONA_ARCHETYPE_PROFILES.get(archetype)
+        if profile is None:
+            raise ValueError(f"archetype persona tidak dikenal: {archetype}")
         for index in range(count):
             members.append(
                 CouncilMember(
@@ -142,6 +181,7 @@ def persona_council(request: SimulationRequest) -> tuple[CouncilMember, ...]:
                     role="customer_persona",
                     mandate=(
                         "Evaluasi tawaran untuk kebutuhan makan kamu saat ini. "
+                        f"{profile.focus} {profile.decision_rule} "
                         "Kamu bukan pelanggan nyata dan tidak boleh mengaku "
                         "sebagai pelanggan nyata."
                     ),

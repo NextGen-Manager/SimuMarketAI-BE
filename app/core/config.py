@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     oasis_model_id: str = "gemini-3.1-flash-lite"
     oasis_package_version: str = "0.2.5"
     camel_package_version: str = "0.2.78"
-    oasis_prompt_version: str = "oasis-council-v1"
+    oasis_prompt_version: str = "oasis-council-v2"
     oasis_cohort_version: str = "jabodetabek-fnb-v1"
     oasis_seed: int = 42
     oasis_cohort_size: int = 16

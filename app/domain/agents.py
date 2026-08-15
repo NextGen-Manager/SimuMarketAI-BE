@@ -405,6 +405,7 @@ class RoundRecord(StrictModel):
     index: int = Field(ge=0)
     kind: Literal["baseline_interview", "exposure", "interaction", "intervention", "final_ballot"]
     activated_agent_ids: list[str] = Field(default_factory=list)
+    exposed_agent_ids: list[str] = Field(default_factory=list)
     actions: dict[str, str] = Field(default_factory=dict)
 
 

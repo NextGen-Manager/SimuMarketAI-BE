@@ -87,7 +87,7 @@ async def test_fake_four_agent_run_produces_typed_artifacts(database_app: FastAP
     review = report["agent_review"]
     assert review["status"] == "available"
     assert review["manifest"]["model_id"] == "gemini-3.1-flash-lite"
-    assert review["manifest"]["prompt_version"] == "oasis-council-v1"
+    assert review["manifest"]["prompt_version"] == "oasis-council-v2"
     assert review["manifest"]["cohort_version"] == "jabodetabek-fnb-v1"
     assert review["market_observations"]
     assert review["finance_critiques"]

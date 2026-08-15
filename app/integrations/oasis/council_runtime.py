@@ -59,6 +59,7 @@ class SocialActionResult(StrictModel):
     action: str
     tokens: int = 0
     duration_ms: int = 0
+    observed_stimulus: bool
 
 
 class CouncilRuntime(Protocol):

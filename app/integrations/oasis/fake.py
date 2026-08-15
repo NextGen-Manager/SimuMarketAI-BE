@@ -95,6 +95,7 @@ class FakeCouncilRuntime:
         self._trace: _TraceWriter | None = None
         self._restricted: dict[int, tuple[str, ...]] = {}
         self._drafts: dict[AgentRole, int] = {}
+        self._stimulus_published = False
 
     # ------------------------------------------------------------ lifecycle
 
@@ -146,6 +147,7 @@ class FakeCouncilRuntime:
         label: str,
     ) -> None:
         await self._sleep()
+        self._stimulus_published = True
         self._write(
             agent_id="orchestrator",
             role="customer_persona",
@@ -171,6 +173,7 @@ class FakeCouncilRuntime:
                 action=action,
                 tokens=self._token_cost,
                 duration_ms=max(1, int(self._delay * 1_000)),
+                observed_stimulus=self._stimulus_published,
             )
             self._write(
                 agent_id=self._roster[index][1].agent_id,

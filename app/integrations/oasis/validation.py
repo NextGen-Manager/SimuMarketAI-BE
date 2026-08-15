@@ -67,6 +67,10 @@ def validate_council_payload(
             if isinstance(observed, dict)
             else {}
         )
+        exposed = raw.get("exposed_agent_ids")
+        exposed_agent_ids = (
+            {str(agent_id) for agent_id in exposed} if isinstance(exposed, list) else set()
+        )
         rounds = raw.get("rounds")
         return reduce_persona_ballots(
             ballots,
@@ -75,6 +79,7 @@ def validate_council_payload(
             rounds=int(rounds) if isinstance(rounds, int) else request.budget.round_limit,
             baseline=baseline,
             reactions=reactions,
+            social_exposure_complete=len(exposed_agent_ids) == request.cohort.size,
         )
 
     if role == "finance":

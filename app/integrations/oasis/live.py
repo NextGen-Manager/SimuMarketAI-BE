@@ -108,7 +108,11 @@ def build_profiles(roster: tuple[tuple[AgentRole, CouncilMember], ...]) -> list[
             "username": member.agent_id,
             "realname": member.agent_id,
             "bio": f"Agent sintetis peran {role}.",
-            "persona": member.mandate,
+            "persona": (
+                member.mandate
+                if member.archetype is None
+                else f"Arketipe hipotesis {member.archetype}. {member.mandate}"
+            ),
             "mbti": "N/A",
             "gender": "N/A",
             "age": "N/A",
@@ -138,6 +142,8 @@ class CamelCouncilRuntime:
         self._env: Any = None
         self._graph: Any = None
         self._stimulus_post_id: int | None = None
+        self._stimulus_marker: str | None = None
+        self._llm_semaphore = asyncio.Semaphore(request.budget.concurrency_limit)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -263,7 +269,12 @@ class CamelCouncilRuntime:
         from oasis import ActionType
 
         author = self._agent(STIMULUS_AUTHOR_INDEX)
-        content = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
+        self._stimulus_marker = (
+            f"[simumarket-stimulus:{self._request.analysis_ref}:{round_index}:{label}]"
+        )
+        content = f"{self._stimulus_marker} " + json.dumps(
+            dict(payload), ensure_ascii=False, sort_keys=True
+        )
         result = await author.perform_action_by_data(
             ActionType.CREATE_POST,
             content=f"[round {round_index} {label}] {content}",
@@ -284,11 +295,20 @@ class CamelCouncilRuntime:
         # feed and "interaction" would be a second independent monologue.
         await self._env.platform.update_rec_table()
 
-        async def act(index: int) -> tuple[int, object, int]:
+        async def act(index: int) -> tuple[int, object, int, bool]:
             began = time.perf_counter_ns()
-            response = await self._agent(index).perform_action_by_llm()
+            agent = self._agent(index)
+            environment_prompt = await agent.env.to_text_prompt()
+            observed_stimulus = bool(
+                self._stimulus_marker and self._stimulus_marker in str(environment_prompt)
+            )
+            # `OasisEnv.step` normally applies its own LLM semaphore. We call
+            # the agent directly so the chosen action and token usage remain
+            # observable, therefore the adapter must preserve the same limit.
+            async with self._llm_semaphore:
+                response = await agent.perform_action_by_llm()
             elapsed_ms = (time.perf_counter_ns() - began) // 1_000_000
-            return index, response, elapsed_ms
+            return index, response, elapsed_ms, observed_stimulus
 
         responses = await asyncio.gather(
             *(act(index) for index in agent_indices),
@@ -302,9 +322,12 @@ class CamelCouncilRuntime:
                     "oasis_agent_action_failed",
                     extra={"agent_index": requested_index, "round_index": round_index},
                 )
-                taken[requested_index] = SocialActionResult(action=ACTION_DO_NOTHING)
+                taken[requested_index] = SocialActionResult(
+                    action=ACTION_DO_NOTHING,
+                    observed_stimulus=False,
+                )
                 continue
-            index, agent_response, elapsed_ms = response
+            index, agent_response, elapsed_ms, observed_stimulus = response
             if isinstance(agent_response, BaseException):
                 logger.warning(
                     "oasis_agent_action_failed",
@@ -313,6 +336,7 @@ class CamelCouncilRuntime:
                 taken[index] = SocialActionResult(
                     action=ACTION_DO_NOTHING,
                     duration_ms=elapsed_ms,
+                    observed_stimulus=observed_stimulus,
                 )
                 continue
             info = getattr(agent_response, "info", None)
@@ -320,6 +344,7 @@ class CamelCouncilRuntime:
                 action=_chosen_action(info),
                 tokens=_usage_tokens(info),
                 duration_ms=elapsed_ms,
+                observed_stimulus=observed_stimulus,
             )
         return taken
 

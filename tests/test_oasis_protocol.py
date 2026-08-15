@@ -136,9 +136,11 @@ class _StubRuntime:
     reply_delay_seconds: float = 0.0
     started: bool = False
     closed: bool = False
+    stimulus_published: bool = False
     # Personas whose final choice differs from their baseline choice.
     shifting: frozenset[str] = frozenset()
     liking: frozenset[str] = frozenset()
+    unexposed: frozenset[str] = frozenset()
 
     async def start(self) -> None:
         self.started = True
@@ -170,6 +172,7 @@ class _StubRuntime:
     async def publish_stimulus(
         self, payload: Mapping[str, object], *, round_index: int, label: str
     ) -> None:
+        self.stimulus_published = True
         self.calls.append(
             _Call(kind="publish", round_index=round_index, label=label, prompt=json.dumps(payload))
         )
@@ -187,6 +190,7 @@ class _StubRuntime:
                 action=ACTION_LIKE_POST if agent_id in self.liking else ACTION_CREATE_COMMENT,
                 tokens=self.tokens_per_action,
                 duration_ms=1,
+                observed_stimulus=(self.stimulus_published and agent_id not in self.unexposed),
             )
         return taken
 
@@ -323,6 +327,7 @@ async def test_every_round_is_recorded_with_its_activation_subset() -> None:
     # docs/04 asks for the activation subset to be stored, which is only
     # meaningful if it is genuinely a subset.
     assert len(exposure.activated_agent_ids) == request.cohort.size
+    assert exposure.exposed_agent_ids == exposure.activated_agent_ids
     assert 0 < len(interaction.activated_agent_ids) < request.cohort.size
     assert set(interaction.activated_agent_ids) <= set(exposure.activated_agent_ids)
     assert interaction.actions
@@ -419,6 +424,25 @@ async def test_no_reactions_observed_means_a_zero_not_a_guess() -> None:
     assert simulation is not None
     assert simulation.positive_reaction_count == 0
     assert simulation.activated_persona_count == request.cohort.size
+
+
+async def test_unexposed_personas_are_not_counted_as_positive_reactions() -> None:
+    request = _request()
+    personas = [
+        member.agent_id for role, member in build_roster(request) if role == "customer_persona"
+    ]
+    runtime = _stub(
+        request,
+        liking=frozenset(personas),
+        unexposed=frozenset(personas[:1]),
+    )
+
+    outcome = await _run(runtime, request)
+
+    simulation = outcome.customer_simulation
+    assert simulation is not None
+    assert simulation.positive_reaction_count == len(personas) - 1
+    assert any("exposure" in item for item in simulation.limitations)
 
 
 # ------------------------------------------------------------------- handoffs

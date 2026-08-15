@@ -283,6 +283,7 @@ class CouncilOrchestrator:
         rounds: list[RoundRecord] = []
         reactions: dict[str, int] = {}
         actions_by_agent: dict[str, list[str]] = {}
+        initially_exposed: set[str] = set()
         baseline: list[dict[str, Any]] = []
         instances: list[AgentInstanceRecord] = []
         # Per-agent, never an average. An averaged per-instance cost hides the
@@ -321,19 +322,25 @@ class CouncilOrchestrator:
                 )
             taken = await self._runtime.step(activated, round_index=round_index)
             budget.spend(sum(result.tokens for result in taken.values()))
+            exposed_agent_ids = [
+                self._agent_id(index) for index, result in taken.items() if result.observed_stimulus
+            ]
+            if kind == "exposure":
+                initially_exposed.update(exposed_agent_ids)
             for index, result in taken.items():
                 tokens_by_index[index] += result.tokens
                 duration_by_index[index] += result.duration_ms
                 action = result.action
                 agent_id = self._agent_id(index)
                 actions_by_agent.setdefault(agent_id, []).append(action)
-                if action in POSITIVE_ACTIONS:
+                if result.observed_stimulus and action in POSITIVE_ACTIONS:
                     reactions[agent_id] = reactions.get(agent_id, 0) + 1
             rounds.append(
                 RoundRecord(
                     index=round_index,
                     kind=kind,
                     activated_agent_ids=[self._agent_id(index) for index in activated],
+                    exposed_agent_ids=exposed_agent_ids,
                     actions={
                         self._agent_id(index): result.action for index, result in taken.items()
                     },
@@ -380,6 +387,7 @@ class CouncilOrchestrator:
             "baseline_ballots": baseline,
             "final_ballots": final,
             "observed_reactions": reactions,
+            "exposed_agent_ids": sorted(initially_exposed),
             "rounds": len(plan),
         }
         duration_ms = (time.perf_counter_ns() - began) // 1_000_000
@@ -441,7 +449,9 @@ class CouncilOrchestrator:
             # itself something else would corrupt the baseline-to-final pairing
             # that opinion shift is computed from.
             entry["agent_id"] = self._roster[index][1].agent_id
-            entry.setdefault("archetype", self._roster[index][1].archetype or "budget_driven")
+            # Archetype is also manifest-owned. Accepting the model's label
+            # would let a quality persona silently move into the budget segment.
+            entry["archetype"] = self._roster[index][1].archetype or "budget_driven"
             ballots.append(entry)
         return ballots, cost, failures
 
