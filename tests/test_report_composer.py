@@ -86,9 +86,12 @@ def test_engines_never_import_integrations_or_an_llm_client() -> None:
 
     assert not offenders, f"deterministic engines must stay LLM-free: {offenders}"
 
-    # Nothing pulled an agent framework into the interpreter either.
-    loaded = {name.lower() for name in sys.modules}
-    assert not any(hint in name for name in loaded for hint in ("oasis", "camel", "langchain"))
+    # No third-party agent framework was pulled into the interpreter either. The
+    # check is on top-level distributions: `app.integrations.oasis` is our own
+    # adapter package and contains the word, while `oasis` and `camel` are the
+    # vendor libraries the engines must never drag in.
+    top_level = {name.split(".", 1)[0].lower() for name in sys.modules}
+    assert not top_level & {"oasis", "camel", "langchain", "langchain_core"}
 
 
 async def test_report_without_evidence_is_complete_and_honest() -> None:
@@ -125,15 +128,18 @@ async def test_synthetic_simulation_is_unavailable_not_invented() -> None:
     assert report.synthetic_simulation.metrics == {}
     assert report.synthetic_simulation.limitations
 
-    # There is no field a fabricated persona quote could even be placed in.
-    payload = report.model_dump(mode="json")
-    assert set(payload["synthetic_simulation"]) == {
-        "status",
-        "reason",
-        "cohort_size",
-        "metrics",
-        "limitations",
-    }
+    # Every field that could carry simulation content is empty rather than
+    # filled with a plausible placeholder, and the validator enforces that.
+    assert report.synthetic_simulation.quotes == []
+    assert report.synthetic_simulation.segments == []
+    assert report.synthetic_simulation.objections == []
+    assert report.synthetic_simulation.acceptable_price_band is None
+    assert report.synthetic_simulation.cohort_version is None
+    assert report.synthetic_simulation.rounds is None
+    assert report.agent_review.status == "unavailable"
+    assert report.agent_review.manifest is None
+    assert report.agent_review.narrative_sections == []
+    assert validate_report(report) == []
 
 
 async def test_every_recommendation_and_risk_names_its_source() -> None:
