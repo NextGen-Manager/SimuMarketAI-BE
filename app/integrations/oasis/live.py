@@ -152,21 +152,21 @@ class CamelCouncilRuntime:
                 "Paket camel-oasis belum terpasang pada environment ini."
             ) from error
 
-        trace_path = Path(manifest.trace.object_key)
+        trace_path = Path(self._manifest.trace.object_key)
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         if trace_path.exists():
             # A per-run path that already exists means two runs would share one
             # environment. Refuse rather than overwrite another run's trace.
             raise OasisUnavailableError("Trace path untuk run ini sudah dipakai.")
 
-        # Seeding only fixes activation order and sampling on our side. LLM output
-        # is not bit-for-bit reproducible, which is why docs/04 asks for a manifest
-        # rather than promising determinism.
-        random.seed(manifest.seed)
+        # Seeding fixes activation order and sampling on our side only. LLM
+        # output is not bit-for-bit reproducible, which is why docs/04 asks for a
+        # manifest rather than promising determinism.
+        random.seed(self._manifest.seed)
 
         profile_path = trace_path.parent / PROFILE_FILE_NAME
         profile_path.write_text(
-            json.dumps(build_profiles(roster), ensure_ascii=False, indent=2),
+            json.dumps(build_profiles(self._roster), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -175,170 +175,190 @@ class CamelCouncilRuntime:
             model_type=self._model_id,
             model_config_dict={
                 "temperature": 0,
-                "max_tokens": request.budget.max_output_tokens_per_stage,
+                "max_tokens": self._request.budget.max_output_tokens_per_stage,
             },
             api_key=self._api_key,
-            max_retries=request.budget.retry_limit,
-            timeout=request.budget.wall_clock_seconds,
+            max_retries=self._request.budget.retry_limit,
+            timeout=self._request.budget.wall_clock_seconds,
         )
-        graph = await generate_reddit_agent_graph(
+        self._graph = await generate_reddit_agent_graph(
             profile_path=str(profile_path),
             model=model,
-            # INTERVIEW is deliberately absent: docs/04 has the orchestrator drive
-            # it, so an agent must not be able to select it autonomously.
-            available_actions=[
-                ActionType.CREATE_COMMENT,
-                ActionType.LIKE_POST,
-                ActionType.DISLIKE_POST,
-                ActionType.PURCHASE_PRODUCT,
-                ActionType.DO_NOTHING,
-            ],
+            available_actions=[ActionType(action) for action in PERSONA_ACTION_SPACE],
         )
-        environment = oasis.make(
-            agent_graph=graph,
+        self._env = oasis.make(
+            agent_graph=self._graph,
             platform=oasis.DefaultPlatformType.REDDIT,
             database_path=str(trace_path),
+            semaphore=self._request.budget.concurrency_limit,
         )
-        return environment, graph
+        await self._env.reset()
 
-    # --------------------------------------------------------------- councils
+    async def close(self) -> None:
+        if self._env is not None:
+            await self._env.close()
 
-    def _run_finance_tool(
-        self, request: SimulationRequest, finance_tool: FinanceTool
-    ) -> tuple[FinanceToolCall, ...]:
-        bounds = request.finance_bounds
-        return tuple(
-            finance_tool({"volume_units_day": volume})
-            for volume in (
-                bounds.volume_units_day_min,
-                bounds.volume_units_day_base,
-                bounds.volume_units_day_max,
-            )
-        )
+    # --------------------------------------------------------------- actions
 
-    async def _run_council(
+    async def restrict_actions(self, agent_index: int, actions: Sequence[str]) -> None:
+        """Drop every social tool this agent's council is not allowed to use.
+
+        The graph is built with one action space for everyone. docs/04 gives each
+        council its own allowlist, and the deliberative councils have no OASIS
+        action at all — their tools are orchestrator-driven — so they are left
+        with `do_nothing` and cannot post into the persona feed.
+        """
+        agent = self._agent(agent_index)
+        allowed = {action for action in actions if action in PERSONA_ACTION_SPACE}
+        allowed.add(ACTION_DO_NOTHING)
+        for name in list(getattr(agent, "_internal_tools", {})):
+            if name in PERSONA_ACTION_SPACE and name not in allowed:
+                agent.remove_tool(name)
+
+    async def interview(
         self,
-        role: AgentRole,
-        request: SimulationRequest,
-        member_indices: tuple[int, ...],
+        agent_index: int,
+        prompt: str,
         *,
-        roster: tuple[tuple[AgentRole, CouncilMember], ...],
-        graph: Any,
-        tool_calls: tuple[FinanceToolCall, ...],
-        semaphore: asyncio.Semaphore,
-        remaining_tokens: int,
-        deadline: float,
-    ) -> tuple[AgentRunRecord, int]:
+        round_index: int,
+        purpose: str,
+    ) -> AgentReply:
         from camel.messages import BaseMessage
         from oasis import ActionType
 
-        instances: list[AgentInstanceRecord] = []
-        payloads: list[dict[str, Any]] = []
-        spent = 0
-        schema_failures = 0
-
-        for order, index in enumerate(member_indices):
-            if time.monotonic() > deadline:
-                raise OasisTimeoutError(OasisTimeoutError.reason)
-            if spent >= remaining_tokens:
-                raise OasisBudgetExceededError(OasisBudgetExceededError.reason)
-
-            member = roster[index][1]
-            prompt = build_prompt(
-                member,
-                request,
-                round_index=min(order, request.budget.round_limit - 1),
-                finance_tool_calls=tool_calls if role == "finance" else (),
-            )
-            agent = graph.get_agent(index)
-            begin = time.perf_counter_ns()
-            outcome: str = "completed"
-            try:
-                async with semaphore:
-                    response = await asyncio.wait_for(
-                        agent.astep(
-                            BaseMessage.make_user_message(role_name="Orchestrator", content=prompt)
-                        ),
-                        timeout=max(1.0, deadline - time.monotonic()),
-                    )
-            except TimeoutError as error:
-                raise OasisTimeoutError(OasisTimeoutError.reason) from error
-
-            content = response.msgs[0].content if response.msgs else "{}"
-            # Recorded as an orchestrator-driven INTERVIEW so the whole
-            # deliberation is auditable from the trace, not only the final ballot.
-            await agent.env.action.perform_action(
-                {"prompt_version": PROFILE_VERSION, "role": role},
-                ActionType.INTERVIEW.value,
-            )
-            spent += _usage_tokens(response.info)
-            try:
-                payloads.append(_extract_json(content))
-            except OasisSchemaError:
-                schema_failures += 1
-                outcome = "failed"
-
-            instances.append(
-                AgentInstanceRecord(
-                    agent_id=member.agent_id,
-                    role=role,
-                    archetype=member.archetype,
-                    profile_version=PROFILE_VERSION,
-                    model_id=self._model_id,
-                    allowed_actions=list(member.allowed_actions),
-                    activation_order=order,
-                    total_tokens=spent,
-                    duration_ms=(time.perf_counter_ns() - begin) // 1_000_000,
-                    outcome="completed" if outcome == "completed" else "failed",
-                )
-            )
-
-        merged = self._merge(role, payloads)
-        rejected = AgentRunRecord(
-            role=role,
-            status="failed",
-            instances=instances,
-            total_tokens=spent,
-            schema_failures=schema_failures + 1,
-            failure_code="oasis_schema_invalid",
-            validation_status="rejected",
-        )
-        if merged is None:
-            return rejected, spent
-
+        agent = self._agent(agent_index)
+        # Interviews must return the requested JSON, not take a social action.
+        # Persona tools are restored immediately afterwards for exposure and
+        # interaction rounds. Each persona is interviewed at most once at a
+        # time, so this temporary narrowing cannot race another call on it.
+        tools = list(getattr(agent, "_internal_tools", {}).values())
+        for tool in tools:
+            agent.remove_tool(tool.get_function_name())
         try:
-            artifact = validate_council_payload(role, merged, request, tool_calls)
-        except (ValidationError, ValueError, KeyError):
-            # The provider response never leaves this process; only the role and
-            # the pseudonymous reference are logged.
-            logger.warning(
-                "oasis_artifact_rejected",
-                extra={"role": role, "analysis_ref": request.analysis_ref},
+            response = await agent.astep(
+                BaseMessage.make_user_message(role_name="Orchestrator", content=prompt)
             )
-            return rejected, spent
+        finally:
+            for tool in tools:
+                agent.add_tool(tool)
+        content = response.msgs[0].content if response.msgs else ""
+        # Recorded so the whole deliberation is auditable from the trace, not
+        # only the final ballot.
+        await agent.env.action.perform_action(
+            {
+                "prompt": f"[{PROFILE_VERSION}] round {round_index} {purpose}",
+                "response": content,
+            },
+            ActionType.INTERVIEW.value,
+        )
+        return AgentReply(content=content, tokens=_usage_tokens(response.info))
 
-        return (
-            AgentRunRecord(
-                role=role,
-                status="completed",
-                instances=instances,
-                total_tokens=spent,
-                schema_failures=schema_failures,
-                artifact=artifact,
-            ),
-            spent,
+    async def publish_stimulus(
+        self,
+        payload: Mapping[str, object],
+        *,
+        round_index: int,
+        label: str,
+    ) -> None:
+        from oasis import ActionType
+
+        author = self._agent(STIMULUS_AUTHOR_INDEX)
+        content = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
+        result = await author.perform_action_by_data(
+            ActionType.CREATE_POST,
+            content=f"[round {round_index} {label}] {content}",
+        )
+        if isinstance(result, dict):
+            post_id = result.get("post_id")
+            if isinstance(post_id, int):
+                self._stimulus_post_id = post_id
+
+    async def step(
+        self,
+        agent_indices: Sequence[int],
+        *,
+        round_index: int,
+    ) -> Mapping[int, SocialActionResult]:
+        # What `OasisEnv.step` does before dispatching, and the reason round 2 is
+        # a social round at all: without it every persona sees the same static
+        # feed and "interaction" would be a second independent monologue.
+        await self._env.platform.update_rec_table()
+
+        async def act(index: int) -> tuple[int, object, int]:
+            began = time.perf_counter_ns()
+            response = await self._agent(index).perform_action_by_llm()
+            elapsed_ms = (time.perf_counter_ns() - began) // 1_000_000
+            return index, response, elapsed_ms
+
+        responses = await asyncio.gather(
+            *(act(index) for index in agent_indices),
+            return_exceptions=True,
         )
 
-    @staticmethod
-    def _merge(role: AgentRole, payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """Reduce a council's instance outputs into one artifact payload.
+        taken: dict[int, SocialActionResult] = {}
+        for requested_index, response in zip(agent_indices, responses, strict=True):
+            if isinstance(response, BaseException):
+                logger.warning(
+                    "oasis_agent_action_failed",
+                    extra={"agent_index": requested_index, "round_index": round_index},
+                )
+                taken[requested_index] = SocialActionResult(action=ACTION_DO_NOTHING)
+                continue
+            index, agent_response, elapsed_ms = response
+            if isinstance(agent_response, BaseException):
+                logger.warning(
+                    "oasis_agent_action_failed",
+                    extra={"agent_index": index, "round_index": round_index},
+                )
+                taken[index] = SocialActionResult(
+                    action=ACTION_DO_NOTHING,
+                    duration_ms=elapsed_ms,
+                )
+                continue
+            info = getattr(agent_response, "info", None)
+            taken[index] = SocialActionResult(
+                action=_chosen_action(info),
+                tokens=_usage_tokens(info),
+                duration_ms=elapsed_ms,
+            )
+        return taken
 
-        Personas contribute one ballot each. The other councils deliberate in
-        sequence — draft, critique, revision — so the last valid output is the
-        council's position and the earlier drafts stay in the trace.
-        """
-        if not payloads:
-            return None
-        if role == "customer_persona":
-            return {"ballots": payloads}
-        return payloads[-1]
+    # ---------------------------------------------------------------- helper
+
+    def _agent(self, index: int) -> Any:
+        if self._graph is None:
+            raise OasisUnavailableError("Environment OASIS belum disiapkan.")
+        return self._graph.get_agent(index)
+
+
+class LiveOasisAdapter:
+    adapter_id = "oasis-live"
+    is_fake = False
+
+    def __init__(self, *, api_key: str, model_id: str, provider: str = "gemini") -> None:
+        self._api_key = api_key
+        self._model_id = model_id
+        self._provider = provider
+
+    async def simulate(
+        self,
+        request: SimulationRequest,
+        *,
+        finance_tool: FinanceTool,
+        manifest: RunManifest,
+    ) -> SimulationOutcome:
+        roster = build_roster(request)
+        runtime = CamelCouncilRuntime(
+            api_key=self._api_key,
+            model_id=self._model_id,
+            request=request,
+            manifest=manifest,
+            roster=roster,
+        )
+        orchestrator = CouncilOrchestrator(
+            runtime,
+            model_id=self._model_id,
+            request=request,
+            manifest=manifest,
+        )
+        return await orchestrator.run(finance_tool)
