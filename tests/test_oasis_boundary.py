@@ -37,6 +37,7 @@ from app.integrations.oasis import (
     simulation_is_planned,
 )
 from app.integrations.oasis.prompts import (
+    PROMPT_VERSION,
     SHARED_MANDATE,
     build_prompt,
     council_for,
@@ -54,6 +55,17 @@ def test_worker_extra_rejects_the_incompatible_mcp_major_version() -> None:
     dependencies = project["project"]["optional-dependencies"]["oasis"]
 
     assert "mcp<2" in dependencies
+
+
+def test_worker_image_prepares_the_oasis_import_log_directory() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "mkdir -p /app/log" in dockerfile
+    assert "chown simumarket:simumarket /app/log" in dockerfile
+
+
+def test_manifest_prompt_version_matches_the_prompt_source() -> None:
+    assert _settings().oasis_prompt_version == PROMPT_VERSION
 
 
 QUALITY = EvidenceQuality(

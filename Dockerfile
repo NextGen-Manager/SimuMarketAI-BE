@@ -25,9 +25,13 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
 
+# camel-oasis 0.2.5 creates ./log during import, relative to WORKDIR. Keep only
+# that directory writable instead of granting the runtime write access to /app.
 RUN groupadd --system --gid 10001 simumarket \
     && useradd --system --uid 10001 --gid simumarket --create-home simumarket \
+    && mkdir -p /app/log \
     && mkdir -p /var/lib/simumarket/oasis-traces \
+    && chown simumarket:simumarket /app/log \
     && chown -R simumarket:simumarket /var/lib/simumarket
 
 USER simumarket
