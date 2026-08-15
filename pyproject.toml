@@ -54,6 +54,17 @@ plugins = ["pydantic.mypy"]
 module = ["celery.*"]
 ignore_missing_imports = true
 
+# camel-oasis lives in the isolated spike environment, not in the backend
+# lockfile, so the live adapter imports it lazily and mypy cannot see stubs.
+[[tool.mypy.overrides]]
+module = ["oasis.*", "camel.*"]
+ignore_missing_imports = true
+
+# Celery's task decorator is untyped upstream; the task body itself stays typed.
+[[tool.mypy.overrides]]
+module = ["app.workers.*"]
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
