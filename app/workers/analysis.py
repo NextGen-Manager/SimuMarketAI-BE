@@ -28,8 +28,8 @@ from app.domain.agents import OasisAdapter
 from app.domain.evidence import EvidenceProvider
 from app.integrations.evidence import select_evidence_provider
 from app.integrations.oasis import select_oasis_adapter
-from app.persistence.database import get_session_factory
-from app.persistence.redis import get_redis
+from app.persistence.database import dispose_engine, get_session_factory
+from app.persistence.redis import dispose_redis, get_redis
 from app.services.analysis_events import (
     AnalysisEventPublisher,
     NullEventPublisher,
@@ -88,6 +88,46 @@ async def execute_recovery(
         )
 
 
+async def _dispose_task_resources() -> None:
+    """Keep async clients from crossing Celery's per-task event loops.
+
+    Celery calls these synchronous task functions repeatedly in one process,
+    while `asyncio.run` creates a new loop each time. A pooled asyncpg or Redis
+    connection from the previous loop cannot be reused by the next one.
+    """
+    for name, disposer in (
+        ("database", dispose_engine),
+        ("redis", dispose_redis),
+    ):
+        try:
+            await disposer()
+        except Exception:
+            logger.exception("analysis_task_resource_dispose_failed", extra={"resource": name})
+
+
+async def _run_analysis_task(analysis_id: UUID, settings: Settings) -> None:
+    try:
+        await execute_analysis(
+            analysis_id,
+            session_factory=get_session_factory(),
+            settings=settings,
+            publisher=_redis_publisher(),
+        )
+    finally:
+        await _dispose_task_resources()
+
+
+async def _run_recovery_task(settings: Settings) -> RecoveryReport:
+    try:
+        return await execute_recovery(
+            session_factory=get_session_factory(),
+            settings=settings,
+            publisher=_redis_publisher(),
+        )
+    finally:
+        await _dispose_task_resources()
+
+
 @celery_app.task(
     bind=True,
     name="analysis.run",
@@ -111,14 +151,7 @@ def run_analysis(self: Task, analysis_id: str, correlation_id: str) -> None:
         "analysis_task_started",
         extra={"analysis_id": analysis_id, "correlation_id": correlation_id},
     )
-    asyncio.run(
-        execute_analysis(
-            UUID(analysis_id),
-            session_factory=get_session_factory(),
-            settings=settings,
-            publisher=_redis_publisher(),
-        )
-    )
+    asyncio.run(_run_analysis_task(UUID(analysis_id), settings))
 
 
 @celery_app.task(name="analysis.recover")
@@ -129,13 +162,7 @@ def recover_analyses() -> dict[str, list[str]]:
     so docs/11 puts recovery on PostgreSQL state. This is the job that reads it.
     """
     settings = get_settings()
-    report = asyncio.run(
-        execute_recovery(
-            session_factory=get_session_factory(),
-            settings=settings,
-            publisher=_redis_publisher(),
-        )
-    )
+    report = asyncio.run(_run_recovery_task(settings))
     if report.total:
         logger.warning(
             "analysis_recovery_completed",

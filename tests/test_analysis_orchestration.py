@@ -188,6 +188,63 @@ def test_celery_task_is_registered_and_needs_no_broker() -> None:
     assert schedule["schedule"] == float(settings.analysis_recovery_interval_seconds)
 
 
+async def test_celery_task_resources_are_disposed_after_each_event_loop(
+    monkeypatch: Any,
+) -> None:
+    """Async clients created by one ``asyncio.run`` must not reach the next."""
+    from app.services.analysis_recovery import RecoveryReport
+    from app.workers import analysis as worker
+
+    disposed: list[str] = []
+
+    async def recover(**_: Any) -> RecoveryReport:
+        return RecoveryReport(requeued=[], failed=[])
+
+    async def dispose_database() -> None:
+        disposed.append("database")
+
+    async def dispose_cache() -> None:
+        disposed.append("redis")
+
+    monkeypatch.setattr(worker, "execute_recovery", recover)
+    monkeypatch.setattr(worker, "get_session_factory", object)
+    monkeypatch.setattr(worker, "_redis_publisher", object)
+    monkeypatch.setattr(worker, "dispose_engine", dispose_database)
+    monkeypatch.setattr(worker, "dispose_redis", dispose_cache)
+
+    await worker._run_recovery_task(Settings(environment="test"))
+
+    assert disposed == ["database", "redis"]
+
+
+async def test_celery_task_resources_are_disposed_when_execution_fails(
+    monkeypatch: Any,
+) -> None:
+    from app.workers import analysis as worker
+
+    disposed: list[str] = []
+
+    async def fail(**_: Any) -> None:
+        raise RuntimeError("task failed")
+
+    async def dispose_database() -> None:
+        disposed.append("database")
+
+    async def dispose_cache() -> None:
+        disposed.append("redis")
+
+    monkeypatch.setattr(worker, "execute_recovery", fail)
+    monkeypatch.setattr(worker, "get_session_factory", object)
+    monkeypatch.setattr(worker, "_redis_publisher", object)
+    monkeypatch.setattr(worker, "dispose_engine", dispose_database)
+    monkeypatch.setattr(worker, "dispose_redis", dispose_cache)
+
+    with pytest.raises(RuntimeError, match="task failed"):
+        await worker._run_recovery_task(Settings(environment="test"))
+
+    assert disposed == ["database", "redis"]
+
+
 class _UnreachableProvider:
     """An evidence provider whose network is down."""
 
