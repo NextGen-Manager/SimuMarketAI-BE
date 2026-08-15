@@ -23,7 +23,14 @@ services:
   worker:
     build:
       context: .
+      args:
+        # Only the worker gets the OASIS runtime. Without it the live adapter
+        # raises `OasisUnavailableError` and every run is honestly `partial`.
+        INSTALL_OASIS: "1"
     command:
+      - uv
+      - run
+      - --no-sync
       - celery
       - -A
       - app.workers.celery_app
@@ -43,6 +50,33 @@ services:
       # OASIS writes one trace directory per run. Keeping them on a named volume
       # means retention is a deliberate job, not an implicit container restart.
       - oasis-traces:/var/lib/simumarket/oasis-traces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # The reconciler from docs/11. Without a beat process, a run whose dispatch
+  # failed or whose worker died would sit non-terminal forever, because nothing
+  # in Celery can notice a task that never arrived.
+  beat:
+    build:
+      context: .
+    command:
+      - uv
+      - run
+      - --no-sync
+      - celery
+      - -A
+      - app.workers.celery_app
+      - beat
+      - --loglevel=info
+      - --schedule=/tmp/celerybeat-schedule
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://simumarket:simumarket@postgres:5432/simumarket
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
