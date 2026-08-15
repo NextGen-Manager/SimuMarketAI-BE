@@ -198,6 +198,7 @@ class AnalysisRun(Base):
         CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="ck_analysis_score"),
         UniqueConstraint("user_id", "idempotency_key", name="uq_analysis_user_idempotency"),
         Index("ix_analysis_user_created", "user_id", "created_at"),
+        Index("ix_analysis_runs_status_lease", "status", "lease_expires_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -223,6 +224,12 @@ class AnalysisRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_code: Mapped[str | None] = mapped_column(String(80))
+    # Worker lease. A run whose lease has expired is being executed by nobody:
+    # either dispatch never reached the broker or the worker died mid-run. The
+    # reconciler in `app.services.analysis_recovery` finds runs by these two
+    # columns, which is what docs/11 asks for when a queued job is lost.
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Model, prompt, and package versions of the simulation attempt, per docs/10.
     # A provider alias can move without notice, so a run that cannot name the
     # exact model it used cannot be compared against any other run.
@@ -258,6 +265,7 @@ class AnalysisEventRecord(Base):
     percent: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str] = mapped_column(String(300))
     warnings: Mapped[list[dict[str, object]]] = mapped_column(JsonType, default=list)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
     correlation_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

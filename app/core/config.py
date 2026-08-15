@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     celery_analysis_time_limit_seconds: int = 900
     celery_analysis_max_retries: int = 3
 
+    # --- Stuck-run recovery ---------------------------------------------
+    # A worker holds a lease while it executes a run and renews it at every
+    # stage. Nothing renews the lease of a dead worker, so an expired lease is
+    # the signal docs/11 asks for: find the stuck job and requeue it.
+    analysis_lease_seconds: int = 960
+    analysis_queue_grace_seconds: int = 120
+    analysis_max_attempts: int = 3
+    analysis_recovery_interval_seconds: int = 60
+    analysis_recovery_batch_size: int = 50
+
     # --- OASIS ----------------------------------------------------------
     oasis_enabled: bool = True
     oasis_provider: str = "gemini"
@@ -110,6 +120,18 @@ class Settings(BaseSettings):
             raise ValueError("Model berlabel -preview tidak boleh dipakai pada jalur demo")
         if not 12 <= self.oasis_cohort_size <= 24:
             raise ValueError("OASIS_COHORT_SIZE harus berada di rentang 12 sampai 24")
+        return self
+
+    @model_validator(mode="after")
+    def validate_recovery_settings(self) -> "Settings":
+        # A lease shorter than the task hard limit would let the reconciler
+        # declare a healthy worker dead before Celery has stopped it.
+        if self.analysis_lease_seconds <= self.celery_analysis_time_limit_seconds:
+            raise ValueError(
+                "ANALYSIS_LEASE_SECONDS harus lebih besar dari CELERY_ANALYSIS_TIME_LIMIT_SECONDS"
+            )
+        if self.analysis_max_attempts < 1:
+            raise ValueError("ANALYSIS_MAX_ATTEMPTS minimal 1")
         return self
 
 
