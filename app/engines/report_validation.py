@@ -34,65 +34,121 @@ def _numbers_in(text: str) -> set[int]:
     return found
 
 
-def _allowed_numbers(report: AnalysisReport) -> set[int]:
-    """Every number an agent is permitted to repeat.
+def _collect(node: object, into: set[int]) -> None:
+    if isinstance(node, bool):
+        return
+    if isinstance(node, int):
+        into.add(abs(node))
+    elif isinstance(node, dict):
+        for value in node.values():
+            _collect(value, into)
+    elif isinstance(node, list):
+        for value in node:
+            _collect(value, into)
 
-    Built from values a deterministic engine produced or the user supplied. The
-    set is deliberately generous — repeating a legitimate figure must never
-    fail — because the check exists to catch figures with no origin at all.
+
+def _numbers_of(*nodes: object) -> set[int]:
+    found: set[int] = set()
+    for node in nodes:
+        _collect(node, found)
+    return found
+
+
+def _number_sources(report: AnalysisReport) -> dict[str, set[int]]:
+    """The numeric vocabulary of each part of the report, kept separate.
+
+    Pooling every number in the report into one set made the check nearly
+    vacuous: a persona quote could name a figure only because it happened to
+    coincide with a scoring weight. An agent may only repeat numbers from the
+    material it was actually given, so the sets stay apart and each kind of
+    agent text is checked against its own.
     """
-    allowed: set[int] = set()
-
-    def collect(node: object) -> None:
-        if isinstance(node, bool):
-            return
-        if isinstance(node, int):
-            allowed.add(abs(node))
-        elif isinstance(node, dict):
-            for value in node.values():
-                collect(value)
-        elif isinstance(node, list):
-            for value in node:
-                collect(value)
-
-    collect(report.input_snapshot.model_dump(mode="python"))
-    collect(report.finance.model_dump(mode="python"))
-    collect(report.readiness.model_dump(mode="python"))
-    collect(report.market.model_dump(mode="python"))
-    collect(report.synthetic_simulation.model_dump(mode="python"))
+    evidence: set[int] = set()
     for record in report.evidence:
-        allowed.add(abs(record.value))
+        evidence.add(abs(record.value))
         if record.geography.meters is not None:
-            allowed.add(record.geography.meters)
+            evidence.add(record.geography.meters)
+
+    manifest: set[int] = set()
     if report.agent_review.manifest is not None:
-        collect(report.agent_review.manifest.model_dump(mode="python"))
-    return allowed
+        manifest = _numbers_of(report.agent_review.manifest.model_dump(mode="python"))
+
+    return {
+        "input": _numbers_of(report.input_snapshot.model_dump(mode="python")),
+        "finance": _numbers_of(report.finance.model_dump(mode="python")),
+        "readiness": _numbers_of(report.readiness.model_dump(mode="python")),
+        "market": _numbers_of(report.market.model_dump(mode="python")) | evidence,
+        "simulation": _numbers_of(report.synthetic_simulation.model_dump(mode="python")),
+        "manifest": manifest,
+    }
 
 
-def _agent_authored_text(report: AnalysisReport) -> list[tuple[str, str]]:
+# Which sources each kind of agent text may quote from. A finance critique that
+# names a competitor count is citing something it was never shown, even if the
+# number exists elsewhere in the report.
+_SCOPES: dict[str, tuple[str, ...]] = {
+    "observation": ("market", "input"),
+    "critique": ("finance", "input"),
+    "fragile_assumption": ("finance", "input"),
+    "quote": ("simulation", "input"),
+    "red_team": ("market", "finance", "readiness", "simulation", "input"),
+}
+
+# The narrative is scoped by what each section says it drew on, so a section may
+# only use the numeric vocabulary of the artifacts it cites.
+_ARTIFACT_SCOPES: dict[str, tuple[str, ...]] = {
+    "MarketAssessment": ("market",),
+    "CustomerSimulationResult": ("simulation",),
+    "FinanceReview": ("finance",),
+    "ReportNarrative": (),
+}
+
+
+def _agent_authored_text(report: AnalysisReport) -> list[tuple[str, str, set[int]]]:
+    sources = _number_sources(report)
     review = report.agent_review
-    entries: list[tuple[str, str]] = []
+
+    def scope(*names: str) -> set[int]:
+        allowed: set[int] = set()
+        for name in names:
+            allowed |= sources[name]
+        return allowed
+
+    entries: list[tuple[str, str, set[int]]] = []
     for section in review.narrative_sections:
-        entries.append((f"narrative:{section.id}", section.body))
-        entries.append((f"narrative_title:{section.id}", section.title))
+        cited: tuple[str, ...] = ("input", "readiness")
+        for artifact_type in section.source_artifact_types:
+            cited += _ARTIFACT_SCOPES.get(artifact_type, ())
+        allowed = scope(*cited)
+        entries.append((f"narrative:{section.id}", section.body, allowed))
+        entries.append((f"narrative_title:{section.id}", section.title, allowed))
     for index, finding in enumerate(review.red_team_findings):
-        entries.append((f"red_team:{index}", finding))
+        entries.append((f"red_team:{index}", finding, scope(*_SCOPES["red_team"])))
     for observation in review.market_observations:
-        entries.append((f"observation:{observation.id}", observation.claim))
+        entries.append(
+            (f"observation:{observation.id}", observation.claim, scope(*_SCOPES["observation"]))
+        )
     for critique in review.finance_critiques:
-        entries.append((f"critique:{critique.id}", f"{critique.assumption} {critique.concern}"))
+        entries.append(
+            (
+                f"critique:{critique.id}",
+                f"{critique.assumption} {critique.concern}",
+                scope(*_SCOPES["critique"]),
+            )
+        )
     for index, assumption in enumerate(review.fragile_assumptions):
-        entries.append((f"fragile_assumption:{index}", assumption))
+        entries.append(
+            (f"fragile_assumption:{index}", assumption, scope(*_SCOPES["fragile_assumption"]))
+        )
     for quote in report.synthetic_simulation.quotes:
-        entries.append((f"quote:{quote.agent_id}", quote.text))
+        entries.append((f"quote:{quote.agent_id}", quote.text, scope(*_SCOPES["quote"])))
     return entries
 
 
 def validate_agent_numbers(report: AnalysisReport) -> list[str]:
-    """Reject agent text that introduces a number nothing else produced."""
-    allowed = _allowed_numbers(report)
+    """Reject agent text that introduces a number its own material never held."""
     violations: list[str] = []
-    for label, text in _agent_authored_text(report):
+    for label, text, allowed in _agent_authored_text(report):
         for value in sorted(_numbers_in(text) - allowed):
             violations.append(f"unsourced_number_in_narrative:{label}:{value}")
     return violations
