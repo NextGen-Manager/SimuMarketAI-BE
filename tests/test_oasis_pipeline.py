@@ -349,6 +349,105 @@ async def test_wall_clock_limit_actually_stops_a_run(database_app: FastAPI) -> N
     assert report["synthetic_simulation"]["status"] == "unavailable"
 
 
+# ---------------------------------------------------------------- provenance
+
+
+async def test_artifact_sources_name_only_what_a_council_actually_read(
+    database_app: FastAPI,
+) -> None:
+    """Provenance has to describe the run, not the protocol diagram.
+
+    The Report council really is handed the three upstream artifacts, so it
+    really does record three sources. The other councils are handed none, and a
+    plausible-looking list of IDs on them would be a false audit trail.
+    """
+    analysis_id, _ = await _owner_with_run(database_app, adapter=FakeOasisAdapter())
+
+    async with database_app.state.test_session_factory() as session:
+        artifacts = list(
+            await session.scalars(
+                select(AgentArtifact).where(AgentArtifact.analysis_run_id == UUID(analysis_id))
+            )
+        )
+
+    by_type = {artifact.artifact_type: artifact for artifact in artifacts}
+    assert set(by_type) == {
+        "MarketAssessment",
+        "CustomerSimulationResult",
+        "FinanceReview",
+        "ReportNarrative",
+    }
+    for artifact_type in ("MarketAssessment", "CustomerSimulationResult", "FinanceReview"):
+        assert by_type[artifact_type].source_artifact_ids == []
+
+    narrative = by_type["ReportNarrative"]
+    upstream = {
+        str(by_type[artifact_type].id)
+        for artifact_type in ("MarketAssessment", "CustomerSimulationResult", "FinanceReview")
+    }
+    assert set(narrative.source_artifact_ids) == upstream
+
+
+async def test_a_council_that_failed_is_not_listed_as_a_narrative_source(
+    database_app: FastAPI,
+) -> None:
+    adapter = FakeOasisAdapter(invalid_roles=("market_analyst",))
+    analysis_id, payloads = await _owner_with_run(database_app, adapter=adapter)
+    report, _ = payloads  # type: ignore[misc]
+
+    async with database_app.state.test_session_factory() as session:
+        artifacts = list(
+            await session.scalars(
+                select(AgentArtifact).where(AgentArtifact.analysis_run_id == UUID(analysis_id))
+            )
+        )
+
+    by_type = {artifact.artifact_type: artifact for artifact in artifacts}
+    assert "MarketAssessment" not in by_type
+
+    narrative = by_type["ReportNarrative"]
+    assert len(narrative.source_artifact_ids) == 2
+    # And the narrative itself never claims the artifact it never saw.
+    cited = {
+        source
+        for section in report["agent_review"]["narrative_sections"]
+        for source in section["source_artifact_types"]
+    }
+    assert "MarketAssessment" not in cited
+
+
+# ------------------------------------------------------------ trace retention
+
+
+async def test_a_failed_simulation_still_records_its_trace_for_retention(
+    database_app: FastAPI,
+) -> None:
+    """The directory is created before the adapter runs, so it is owed a record.
+
+    Without one, a failed run leaves a directory on disk that no maintenance job
+    knows about — the cleanup requirement in docs/11 would quietly leak.
+    """
+    adapter = FakeOasisAdapter(error=OasisTimeoutError(OasisTimeoutError.reason))
+    analysis_id, payloads = await _owner_with_run(database_app, adapter=adapter)
+    _, detail = payloads  # type: ignore[misc]
+
+    assert detail["status"] == "partial"
+
+    async with database_app.state.test_session_factory() as session:
+        traces = list(
+            await session.scalars(
+                select(AgentTraceArtifact).where(
+                    AgentTraceArtifact.analysis_run_id == UUID(analysis_id)
+                )
+            )
+        )
+
+    assert len(traces) == 1
+    assert traces[0].retention_until is not None
+    assert traces[0].access_scope == "owner_only"
+    assert traces[0].object_key
+
+
 # ------------------------------------------------------------------ terminal
 
 

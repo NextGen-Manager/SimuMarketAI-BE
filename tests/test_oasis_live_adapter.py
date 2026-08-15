@@ -1,10 +1,15 @@
 """Live OASIS adapter.
 
 The parts that can be checked without a provider are checked here: roster
-construction, profile generation, JSON extraction, and the refusal to reuse a
-trace path. The part that cannot — whether Gemini actually returns
-schema-valid council output within budget — is skipped, loudly, rather than
-asserted from a stub that would prove nothing about the real provider.
+construction, profile generation, JSON extraction, response parsing, and the
+refusal to reuse a trace path. The part that cannot — whether Gemini actually
+returns schema-valid council output within budget — is skipped, loudly, rather
+than asserted from a stub that would prove nothing about the real provider.
+
+The round protocol itself is *not* tested here. It lives in
+`app.integrations.oasis.orchestrator`, runs against a `CouncilRuntime`, and is
+covered by `test_oasis_protocol.py` with a deterministic runtime. What remains in
+this module is only the binding to `camel-oasis`.
 
 Nothing in this file has been run against Gemini. `GEMINI_API_KEY` was not
 available while Phase 4 was implemented, so the live integration and the Phase 0
@@ -30,13 +35,14 @@ from app.domain.agents import (
     TraceArtifact,
     build_cohort_manifest,
 )
+from app.integrations.oasis.council_runtime import ACTION_DO_NOTHING, ACTION_LIKE_POST
 from app.integrations.oasis.live import (
     LiveOasisAdapter,
-    _extract_json,
+    _chosen_action,
     _usage_tokens,
     build_profiles,
-    build_roster,
 )
+from app.integrations.oasis.orchestration_support import build_roster, extract_json
 from app.integrations.oasis.runtime import build_manifest
 
 LIVE_SKIP_REASON = (
@@ -123,7 +129,7 @@ def test_profiles_invent_no_demographic_attribute() -> None:
     ],
 )
 def test_json_is_recovered_from_a_wrapped_response(raw: str, expected: dict[str, int]) -> None:
-    assert _extract_json(raw) == expected
+    assert extract_json(raw) == expected
 
 
 @pytest.mark.parametrize("raw", ["tidak ada json", "", "[1, 2, 3]", "{rusak"])
@@ -131,7 +137,7 @@ def test_malformed_output_is_a_schema_error_not_a_crash(raw: str) -> None:
     from app.domain.agents import OasisSchemaError
 
     with pytest.raises(OasisSchemaError):
-        _extract_json(raw)
+        extract_json(raw)
 
 
 def test_token_usage_defaults_to_zero_when_the_provider_omits_it() -> None:
@@ -139,6 +145,19 @@ def test_token_usage_defaults_to_zero_when_the_provider_omits_it() -> None:
     assert _usage_tokens({"usage": {}}) == 0
     assert _usage_tokens({}) == 0
     assert _usage_tokens(None) == 0
+
+
+class _ToolCall:
+    def __init__(self, tool_name: str) -> None:
+        self.tool_name = tool_name
+
+
+def test_the_action_taken_is_read_from_the_tool_call_not_from_prose() -> None:
+    """An agent that called no tool did nothing, and that is a real outcome."""
+    assert _chosen_action({"tool_calls": [_ToolCall(ACTION_LIKE_POST)]}) == ACTION_LIKE_POST
+    assert _chosen_action({"tool_calls": []}) == ACTION_DO_NOTHING
+    assert _chosen_action({}) == ACTION_DO_NOTHING
+    assert _chosen_action(None) == ACTION_DO_NOTHING
 
 
 async def test_an_existing_trace_path_is_refused(tmp_path: Path) -> None:
