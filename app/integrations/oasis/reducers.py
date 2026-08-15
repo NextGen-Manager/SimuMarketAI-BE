@@ -13,7 +13,7 @@ is not a conversion rate; showing "9 dari 16 persona" keeps that visible.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -35,20 +35,24 @@ SIMULATION_LIMITATIONS: tuple[str, ...] = (
 
 
 class PersonaBallot(BaseModel):
-    """One persona's final structured ballot, exactly as docs/03 specifies."""
+    """One persona's structured ballot, exactly as docs/03 specifies.
+
+    Neither reaction nor opinion shift is a field here. A persona reporting "I
+    reacted" or "I changed my mind" would be an LLM producing a number that ends
+    up in the report; both are instead derived by `reduce_persona_ballots` from
+    the round trace and from comparing the baseline ballot with the final one.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     agent_id: str = Field(min_length=1, max_length=64)
     archetype: str = Field(min_length=1, max_length=64)
     choice: Literal["purchase", "consider", "reject"]
-    reacted: bool
     objection_code: str = Field(min_length=1, max_length=64)
     objection_label: str = Field(min_length=1, max_length=200)
     acceptable_price_min_idr: int = Field(ge=0)
     acceptable_price_max_idr: int = Field(ge=0)
     quote: str = Field(min_length=1, max_length=400)
-    shifted: bool
 
     @model_validator(mode="after")
     def validate_band(self) -> PersonaBallot:
@@ -73,12 +77,28 @@ def reduce_persona_ballots(
     cohort_version: str,
     cohort_size: int,
     rounds: int,
+    baseline: Sequence[PersonaBallot] = (),
+    reactions: Mapping[str, int] | None = None,
     max_quotes: int = 4,
 ) -> CustomerSimulationResult:
+    """Count the final ballots, the observed reactions, and the opinion shifts.
+
+    `ballots` are the final ballots, `baseline` the private round-0 ones, and
+    `reactions` the positive actions observed in the trace per agent. Opinion
+    shift is a comparison we make between two ballots, and positive reaction is
+    a count of actions OASIS recorded — neither is a model's claim about itself.
+    """
+    observed = reactions or {}
+    baseline_choice = {ballot.agent_id: ballot.choice for ballot in baseline}
+
     activated = len(ballots)
     purchase = sum(1 for ballot in ballots if ballot.choice == "purchase")
-    positive = sum(1 for ballot in ballots if ballot.reacted)
-    shifted = sum(1 for ballot in ballots if ballot.shifted)
+    positive = sum(1 for ballot in ballots if observed.get(ballot.agent_id, 0) > 0)
+    shifted = sum(
+        1
+        for ballot in ballots
+        if ballot.agent_id in baseline_choice and baseline_choice[ballot.agent_id] != ballot.choice
+    )
 
     per_archetype: Counter[str] = Counter(ballot.archetype for ballot in ballots)
     purchase_per_archetype: Counter[str] = Counter(

@@ -399,6 +399,15 @@ class AgentInstanceRecord(StrictModel):
     outcome: Literal["completed", "failed", "skipped"]
 
 
+class RoundRecord(StrictModel):
+    """One round of the persona protocol, as it was actually executed."""
+
+    index: int = Field(ge=0)
+    kind: Literal["baseline_interview", "exposure", "interaction", "intervention", "final_ballot"]
+    activated_agent_ids: list[str] = Field(default_factory=list)
+    actions: dict[str, str] = Field(default_factory=dict)
+
+
 class AgentRunRecord(StrictModel):
     role: AgentRole
     status: Literal["completed", "failed", "skipped"]
@@ -409,6 +418,12 @@ class AgentRunRecord(StrictModel):
     failure_code: str | None = None
     artifact: AgentArtifactPayload | None = None
     validation_status: ValidationStatus = "valid"
+    # Upstream artifacts this council was actually given, reported by the
+    # adapter that assembled the prompt. docs/04 makes every arrow in the
+    # protocol an artifact ID in the manifest; recording an arrow the council
+    # never received would make provenance look sound while being false.
+    consumed_artifact_types: list[ArtifactType] = Field(default_factory=list)
+    rounds: list[RoundRecord] = Field(default_factory=list)
 
 
 class SimulationOutcome(StrictModel):

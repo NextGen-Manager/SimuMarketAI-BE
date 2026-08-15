@@ -173,16 +173,33 @@ def context_block(request: SimulationRequest) -> str:
     )
 
 
+def simulation_round(index: int) -> str:
+    return f"Round simulasi: {index}."
+
+
+def deliberation_turn(index: int) -> str:
+    """Where a council member sits in its own draft-challenge-revise sequence.
+
+    Deliberately not called a round. A council turn is not a simulation round,
+    and labelling it as one is what made `round_index` meaningless: a Finance
+    council of four members appeared to have run four rounds of a simulation it
+    never took part in.
+    """
+    return f"Giliran deliberasi: {index}."
+
+
 def build_prompt(
     member: CouncilMember,
     request: SimulationRequest,
     *,
-    round_index: int,
+    position: str,
     finance_tool_calls: tuple[FinanceToolCall, ...] = (),
     upstream: dict[str, object] | None = None,
+    task: str | None = None,
+    observed: dict[str, object] | None = None,
 ) -> str:
     parts = [SHARED_MANDATE, f"Peran: {member.role}. Mandat: {member.mandate}"]
-    parts.append(f"Round: {round_index}.")
+    parts.append(position)
     parts.append(context_block(request))
     if finance_tool_calls:
         parts.append(
@@ -193,8 +210,39 @@ def build_prompt(
         )
     if upstream:
         parts.append("Artifact hulu yang sudah tervalidasi: " + _data_block(upstream))
+    if observed:
+        # What this agent did and saw during the rounds, replayed as data. It is
+        # the agent's own trace, not another agent's free text, so it cannot
+        # smuggle an instruction in from elsewhere.
+        parts.append("Catatan interaksi kamu selama simulasi: " + _data_block(observed))
+    if task:
+        parts.append(task)
     parts.append(SCHEMA_INSTRUCTIONS[member.role])
     return " ".join(parts)
+
+
+# --------------------------------------------------------------- round tasks
+
+PERSONA_BASELINE_TASK = (
+    "Ini adalah wawancara pribadi sebelum kamu melihat respons siapa pun. "
+    "Jawab murni dari kebutuhan kamu sendiri."
+)
+
+PERSONA_FINAL_TASK = (
+    "Ini adalah ballot akhir setelah kamu melihat feed dan respons persona lain. "
+    "Boleh berubah pikiran, boleh tetap. Jangan menyebut angka yang tidak ada di <data>."
+)
+
+DELIBERATION_TASK = (
+    "Draft anggota council sebelum kamu ada di bagian artifact hulu. "
+    "Lanjutkan sesuai mandat kamu: setujui, bantah, atau perbaiki, lalu keluarkan "
+    "artifact utuh versi kamu."
+)
+
+REPORT_TASK = (
+    "Susun narasi hanya dari artifact hulu yang diberikan. Kalau sebuah artifact "
+    "tidak ada di <data>, jangan menyebutnya sebagai sumber."
+)
 
 
 SCHEMA_INSTRUCTIONS: dict[AgentRole, str] = {
@@ -206,9 +254,11 @@ SCHEMA_INSTRUCTIONS: dict[AgentRole, str] = {
     ),
     "customer_persona": (
         "Keluarkan JSON ballot dengan field agent_id, archetype, choice "
-        "(purchase|consider|reject), reacted (true|false), objection_code, "
-        "objection_label, acceptable_price_min_idr, acceptable_price_max_idr, "
-        "quote, dan shifted (true|false). Nilai harga adalah bilangan bulat rupiah."
+        "(purchase|consider|reject), objection_code, objection_label, "
+        "acceptable_price_min_idr, acceptable_price_max_idr, dan quote. "
+        "Nilai harga adalah bilangan bulat rupiah. Jangan melaporkan apakah kamu "
+        "berubah pikiran atau bereaksi: keduanya dihitung dari trace, bukan dari "
+        "laporan kamu sendiri."
     ),
     "finance": (
         "Keluarkan JSON FinanceReview dengan field critiques (id, assumption, "

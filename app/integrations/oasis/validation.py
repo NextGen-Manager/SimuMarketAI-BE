@@ -50,15 +50,31 @@ def validate_council_payload(
         return assessment
 
     if role == "customer_persona":
-        entries = raw.get("ballots")
+        entries = raw.get("final_ballots")
         if not isinstance(entries, list) or not entries:
-            raise ArtifactRejectedError("ballot persona kosong")
+            raise ArtifactRejectedError("ballot akhir persona kosong")
         ballots = [PersonaBallot.model_validate(entry) for entry in entries]
+
+        baseline_entries = raw.get("baseline_ballots")
+        baseline = (
+            [PersonaBallot.model_validate(entry) for entry in baseline_entries]
+            if isinstance(baseline_entries, list)
+            else []
+        )
+        observed = raw.get("observed_reactions")
+        reactions = (
+            {str(key): int(value) for key, value in observed.items()}
+            if isinstance(observed, dict)
+            else {}
+        )
+        rounds = raw.get("rounds")
         return reduce_persona_ballots(
             ballots,
             cohort_version=request.cohort.cohort_version,
             cohort_size=request.cohort.size,
-            rounds=request.budget.round_limit,
+            rounds=int(rounds) if isinstance(rounds, int) else request.budget.round_limit,
+            baseline=baseline,
+            reactions=reactions,
         )
 
     if role == "finance":
