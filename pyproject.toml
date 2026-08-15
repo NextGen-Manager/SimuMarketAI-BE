@@ -18,6 +18,24 @@ dependencies = [
     "email-validator>=2.2,<3",
 ]
 
+# The OASIS runtime is an extra, not a default dependency. `camel-oasis` pins
+# `pytest-asyncio==0.23.6` and constrains `mcp<2`, which conflicts with the API's
+# own toolchain, and it pulls a large model stack that the API process never
+# needs. Only the worker image installs it:
+#
+#     uv sync --extra oasis
+#
+# Without it, `LiveOasisAdapter` raises `OasisUnavailableError` on start and the
+# run is honestly `partial` — see `docker-compose.yml`, service `worker`.
+[project.optional-dependencies]
+oasis = [
+    "camel-oasis==0.2.5",
+    "camel-ai==0.2.78",
+    # CAMEL 0.2.78 imports FastMCP from the MCP 1.x module layout. MCP 2.x
+    # resolves successfully but fails at worker import time.
+    "mcp<2",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3,<9",
@@ -27,6 +45,13 @@ dev = [
     "mypy>=1.14,<2",
     "aiosqlite>=0.20,<1",
 ]
+
+# `camel-oasis` pins `pytest==8.2.0`, which the dev group cannot accept. The two
+# are genuinely never installed together — the worker image has no dev group, and
+# CI runs against the fake adapter — so uv is told to resolve them separately
+# instead of failing on a conflict that does not exist in any real environment.
+[tool.uv]
+conflicts = [[{ extra = "oasis" }, { group = "dev" }]]
 
 [build-system]
 requires = ["hatchling"]
@@ -53,6 +78,17 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = ["celery.*"]
 ignore_missing_imports = true
+
+# camel-oasis lives in the isolated spike environment, not in the backend
+# lockfile, so the live adapter imports it lazily and mypy cannot see stubs.
+[[tool.mypy.overrides]]
+module = ["oasis.*", "camel.*"]
+ignore_missing_imports = true
+
+# Celery's task decorator is untyped upstream; the task body itself stays typed.
+[[tool.mypy.overrides]]
+module = ["app.workers.*"]
+disallow_untyped_decorators = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

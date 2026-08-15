@@ -5,11 +5,14 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.api.analysis_dependencies import get_analysis_dispatcher
 from app.api.dependencies import get_auth_rate_limiter
 from app.core.config import Settings, get_settings
 from app.main import create_app
 from app.persistence import models  # noqa: F401
 from app.persistence.database import Base, get_session
+from app.services.analysis_events import NullEventPublisher
+from app.services.analysis_queue import RecordingDispatcher
 
 
 @pytest.fixture
@@ -36,15 +39,32 @@ async def database_app() -> AsyncIterator[FastAPI]:
         async with session_factory() as session:
             yield session
 
-    app = create_app()
-    app.dependency_overrides[get_session] = override_session
-    app.dependency_overrides[get_settings] = lambda: Settings(
+    settings = Settings(
         environment="test",
         database_url="sqlite+aiosqlite:///:memory:",
         jwt_secret="test-secret-with-at-least-thirty-two-characters",
+        # Tests drive the worker directly, so a stream must not sit waiting on a
+        # poll interval that only makes sense against a real broker.
+        sse_poll_interval_seconds=0,
+        sse_heartbeat_seconds=1,
+        sse_max_duration_seconds=2,
     )
+
+    # No test may reach a broker. The dispatcher records instead of queueing, so
+    # a test that forgets to run the pipeline sees a queued run, not a hang.
+    dispatcher = RecordingDispatcher()
+
+    app = create_app()
+    app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_auth_rate_limiter] = NoopRateLimiter
+    app.dependency_overrides[get_analysis_dispatcher] = lambda: dispatcher
     app.state.test_session_factory = session_factory
+    app.state.test_settings = settings
+    app.state.test_dispatcher = dispatcher
+    app.state.test_publisher = NullEventPublisher()
+    app.state.test_evidence_provider = None
+    app.state.test_oasis_adapter = None
     yield app
     await engine.dispose()
 

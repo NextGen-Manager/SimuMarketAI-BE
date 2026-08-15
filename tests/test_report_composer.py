@@ -16,7 +16,14 @@ from app.engines.report import compose_report
 from app.engines.report_validation import validate_report
 from app.engines.scoring import ScoringInput, calculate_score
 from app.integrations.evidence.unavailable import UnavailableEvidenceProvider
-from app.schemas.analysis import DSS_DISCLAIMER, AnalysisInput, AnalysisReport
+from app.schemas.analysis import (
+    DSS_DISCLAIMER,
+    AgentCritiqueView,
+    AgentNarrativeSectionView,
+    AgentObservationView,
+    AnalysisInput,
+    AnalysisReport,
+)
 from tests.support.analysis_payload import golden_input
 from tests.support.evidence import COMPLETE_FIXTURE_VALUES, FixtureEvidenceProvider
 
@@ -86,9 +93,12 @@ def test_engines_never_import_integrations_or_an_llm_client() -> None:
 
     assert not offenders, f"deterministic engines must stay LLM-free: {offenders}"
 
-    # Nothing pulled an agent framework into the interpreter either.
-    loaded = {name.lower() for name in sys.modules}
-    assert not any(hint in name for name in loaded for hint in ("oasis", "camel", "langchain"))
+    # No third-party agent framework was pulled into the interpreter either. The
+    # check is on top-level distributions: `app.integrations.oasis` is our own
+    # adapter package and contains the word, while `oasis` and `camel` are the
+    # vendor libraries the engines must never drag in.
+    top_level = {name.split(".", 1)[0].lower() for name in sys.modules}
+    assert not top_level & {"oasis", "camel", "langchain", "langchain_core"}
 
 
 async def test_report_without_evidence_is_complete_and_honest() -> None:
@@ -125,15 +135,18 @@ async def test_synthetic_simulation_is_unavailable_not_invented() -> None:
     assert report.synthetic_simulation.metrics == {}
     assert report.synthetic_simulation.limitations
 
-    # There is no field a fabricated persona quote could even be placed in.
-    payload = report.model_dump(mode="json")
-    assert set(payload["synthetic_simulation"]) == {
-        "status",
-        "reason",
-        "cohort_size",
-        "metrics",
-        "limitations",
-    }
+    # Every field that could carry simulation content is empty rather than
+    # filled with a plausible placeholder, and the validator enforces that.
+    assert report.synthetic_simulation.quotes == []
+    assert report.synthetic_simulation.segments == []
+    assert report.synthetic_simulation.objections == []
+    assert report.synthetic_simulation.acceptable_price_band is None
+    assert report.synthetic_simulation.cohort_version is None
+    assert report.synthetic_simulation.rounds is None
+    assert report.agent_review.status == "unavailable"
+    assert report.agent_review.manifest is None
+    assert report.agent_review.narrative_sections == []
+    assert validate_report(report) == []
 
 
 async def test_every_recommendation_and_risk_names_its_source() -> None:
@@ -182,6 +195,107 @@ async def test_validation_rejects_a_default_score_on_an_unscorable_dimension() -
     )
 
     assert "dimension_default_score:market_saturation" in validate_report(tampered)
+
+
+async def _report_with_agent_text(**review: object) -> AnalysisReport:
+    report = await build_report(FixtureEvidenceProvider(COMPLETE_FIXTURE_VALUES), status="partial")
+    return report.model_copy(
+        update={
+            "agent_review": report.agent_review.model_copy(
+                update={"status": "available", "reason": None, **review}
+            )
+        }
+    )
+
+
+async def test_agent_text_may_not_borrow_a_number_from_another_section() -> None:
+    """The number check is scoped, not a single pooled set.
+
+    A pooled set made the check nearly vacuous: a finance critique could name a
+    competitor count purely because that integer also happened to appear
+    somewhere else in the report. A council may only repeat numbers from the
+    material it was actually shown.
+    """
+    competitors = next(
+        record.value
+        for record in (
+            await build_report(FixtureEvidenceProvider(COMPLETE_FIXTURE_VALUES), status="partial")
+        ).evidence
+        if record.metric == "competitor_count"
+    )
+
+    report = await _report_with_agent_text(
+        finance_critiques=[
+            AgentCritiqueView(
+                id="FIN-001",
+                assumption="Volume dasar tercapai sejak bulan pertama.",
+                concern=f"Ada {competitors} pesaing di radius ini sehingga volume sulit dicapai.",
+                severity="high",
+                tool_call_ids=["finance-volume-40"],
+            )
+        ]
+    )
+
+    violations = validate_report(report)
+    assert f"unsourced_number_in_narrative:critique:FIN-001:{competitors}" in violations
+
+
+async def test_a_market_observation_may_still_quote_its_own_evidence() -> None:
+    """The scoping must not reject a legitimate citation."""
+    base = await build_report(FixtureEvidenceProvider(COMPLETE_FIXTURE_VALUES), status="partial")
+    competitors = next(
+        record.value for record in base.evidence if record.metric == "competitor_count"
+    )
+
+    report = await _report_with_agent_text(
+        market_observations=[
+            AgentObservationView(
+                id="MA-001",
+                stance="risk",
+                claim=f"Terdapat {competitors} pesaing pada radius analisis.",
+                evidence_metrics=["competitor_count"],
+                confidence="medium",
+            )
+        ]
+    )
+
+    assert not [item for item in validate_report(report) if item.startswith("unsourced_number")]
+
+
+async def test_a_narrative_section_is_scoped_by_the_artifacts_it_cites() -> None:
+    base = await build_report(FixtureEvidenceProvider(COMPLETE_FIXTURE_VALUES), status="partial")
+    bep = base.finance.bep_units_month
+    assert bep is not None
+
+    citing_finance = await _report_with_agent_text(
+        narrative_sections=[
+            AgentNarrativeSectionView(
+                id="NAR-001",
+                title="Ringkasan",
+                body=f"Titik impas berada di {bep} unit per bulan.",
+                source_artifact_types=["FinanceReview"],
+            )
+        ]
+    )
+    assert not [
+        item for item in validate_report(citing_finance) if item.startswith("unsourced_number")
+    ]
+
+    # The same sentence, in a section that says it drew only on the persona
+    # simulation, is a figure that section was never shown.
+    citing_simulation = await _report_with_agent_text(
+        narrative_sections=[
+            AgentNarrativeSectionView(
+                id="NAR-001",
+                title="Ringkasan",
+                body=f"Titik impas berada di {bep} unit per bulan.",
+                source_artifact_types=["CustomerSimulationResult"],
+            )
+        ]
+    )
+    assert f"unsourced_number_in_narrative:narrative:NAR-001:{bep}" in validate_report(
+        citing_simulation
+    )
 
 
 async def test_report_round_trips_through_json() -> None:

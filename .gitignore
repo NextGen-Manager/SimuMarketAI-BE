@@ -16,5 +16,8 @@ traces/
 artifacts/
 *.sqlite
 *.sqlite3
+*.db
 uploads/
 exports/
+# Default OASIS_TRACE_ROOT. One directory per run, holding the interaction trace.
+var/

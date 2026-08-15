@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.domain.agents import SIMULATION_LABEL
 from app.domain.analysis_state import AnalysisStage, AnalysisStatus
 from app.domain.evidence import EvidenceRecord, MissingEvidence
 from app.domain.taxonomy import BusinessType, SalesChannel
@@ -165,12 +166,108 @@ class EvidenceConfidence(BaseModel):
     missing: list[str]
 
 
+class SyntheticQuoteView(BaseModel):
+    """A persona quote. The label travels with the data so no surface can drop it."""
+
+    agent_id: str
+    archetype: str
+    text: str
+    label: Literal["respons sintetis"] = SIMULATION_LABEL
+
+
+class SyntheticObjectionView(BaseModel):
+    code: str
+    label: str
+    count: int
+
+
+class SyntheticSegmentView(BaseModel):
+    archetype: str
+    label: str
+    persona_count: int
+    purchase_intent_count: int
+
+
+class SyntheticPriceBandView(BaseModel):
+    min_idr: int
+    max_idr: int
+
+
 class SyntheticSimulation(BaseModel):
+    """Counts, never shares.
+
+    docs/04 is explicit that a synthetic purchase share is not a conversion
+    rate. Reporting "9 dari 16 persona" keeps the denominator visible, where a
+    percentage next to real market data would read as a measurement.
+    """
+
     status: Literal["unavailable", "experimental"]
     reason: str | None
     cohort_size: int | None
+    cohort_version: str | None = None
+    rounds: int | None = None
     metrics: dict[str, int] = Field(default_factory=dict)
+    segments: list[SyntheticSegmentView] = Field(default_factory=list)
+    objections: list[SyntheticObjectionView] = Field(default_factory=list)
+    acceptable_price_band: SyntheticPriceBandView | None = None
+    quotes: list[SyntheticQuoteView] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+
+
+class AgentObservationView(BaseModel):
+    id: str
+    stance: Literal["opportunity", "risk", "uncertainty"]
+    claim: str
+    evidence_metrics: list[str]
+    confidence: Literal["low", "medium", "high"]
+
+
+class AgentCritiqueView(BaseModel):
+    id: str
+    assumption: str
+    concern: str
+    severity: Literal["low", "medium", "high"]
+    tool_call_ids: list[str]
+
+
+class AgentNarrativeSectionView(BaseModel):
+    id: str
+    title: str
+    body: str
+    source_artifact_types: list[str]
+
+
+class AgentRunManifestView(BaseModel):
+    """What the run can prove about itself. Never a secret, never a prompt."""
+
+    adapter_id: str
+    provider: str
+    model_id: str
+    prompt_version: str
+    cohort_version: str
+    oasis_version: str
+    camel_version: str
+    seed: int
+    persona_count: int
+    round_limit: int
+    token_budget: int
+    tokens_used: int
+
+
+class AgentReview(BaseModel):
+    """Qualitative agent output, kept separate from every authoritative number."""
+
+    status: Literal["available", "partial", "unavailable"]
+    reason: str | None = None
+    label: Literal["respons sintetis"] = SIMULATION_LABEL
+    manifest: AgentRunManifestView | None = None
+    market_observations: list[AgentObservationView] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
+    disagreements: list[str] = Field(default_factory=list)
+    finance_critiques: list[AgentCritiqueView] = Field(default_factory=list)
+    fragile_assumptions: list[str] = Field(default_factory=list)
+    narrative_sections: list[AgentNarrativeSectionView] = Field(default_factory=list)
+    red_team_findings: list[str] = Field(default_factory=list)
 
 
 class MarketSection(BaseModel):
@@ -219,6 +316,7 @@ class AnalysisReport(BaseModel):
     evidence_confidence: EvidenceConfidence
     market: MarketSection
     synthetic_simulation: SyntheticSimulation
+    agent_review: AgentReview
     finance: FinanceResult
     risks: list[ReportRisk]
     recommendations: list[ReportRecommendation]

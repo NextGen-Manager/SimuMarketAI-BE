@@ -11,6 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, get_args
 
+WORKER_LOST_FAILURE_CODE = "worker_lost"
+WORKER_LOST_WARNING = "worker_lost"
+WORKER_LOST_MESSAGE = (
+    "Proses analisis berhenti sebelum selesai dan sudah dicoba ulang sampai batas maksimum."
+)
+
 AnalysisStage = Literal[
     "queued",
     "collecting_evidence",
@@ -65,10 +71,13 @@ STAGE_MESSAGES: dict[AnalysisStage, str] = {
     "validating_report": "Memvalidasi klaim",
 }
 
-# Phase 3 runs the deterministic path only; the agent simulation is not wired.
+# Used when a deployment has no agent adapter wired at all, so the stage is
+# removed from the plan instead of being credited as work that happened.
 SKIP_REASON_SIMULATING = (
     "Simulasi agent belum dijalankan karena integrasi OASIS belum aktif pada versi ini."
 )
+
+TERMINAL_STAGE: AnalysisStage = "validating_report"
 
 
 class InvalidStageTransitionError(RuntimeError):
@@ -112,3 +121,23 @@ def build_stage_plan(*, skip: tuple[AnalysisStage, ...] = ()) -> StagePlan:
 
 
 DETERMINISTIC_STAGE_PLAN = build_stage_plan(skip=("simulating",))
+FULL_STAGE_PLAN = build_stage_plan()
+
+
+def stage_plan_for(*, simulation_planned: bool) -> StagePlan:
+    """Pick the plan a run will actually execute.
+
+    A run that has an adapter keeps `simulating` in the plan even when the
+    adapter later fails: the stage was attempted, so removing it afterwards
+    would rewrite history and inflate the percentage of a partial run.
+    """
+    return FULL_STAGE_PLAN if simulation_planned else DETERMINISTIC_STAGE_PLAN
+
+
+def plan_from_stored(skipped: list[str]) -> StagePlan:
+    known = tuple(stage for stage in ANALYSIS_STAGES if stage in set(skipped))
+    return build_stage_plan(skip=known)
+
+
+def is_terminal(status: str) -> bool:
+    return status in TERMINAL_STATUSES

@@ -198,6 +198,7 @@ class AnalysisRun(Base):
         CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="ck_analysis_score"),
         UniqueConstraint("user_id", "idempotency_key", name="uq_analysis_user_idempotency"),
         Index("ix_analysis_user_created", "user_id", "created_at"),
+        Index("ix_analysis_runs_status_lease", "status", "lease_expires_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -223,6 +224,158 @@ class AnalysisRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_code: Mapped[str | None] = mapped_column(String(80))
+    # Worker lease. A run whose lease has expired is being executed by nobody:
+    # either dispatch never reached the broker or the worker died mid-run. The
+    # reconciler in `app.services.analysis_recovery` finds runs by these two
+    # columns, which is what docs/11 asks for when a queued job is lost.
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Model, prompt, and package versions of the simulation attempt, per docs/10.
+    # A provider alias can move without notice, so a run that cannot name the
+    # exact model it used cannot be compared against any other run.
+    oasis_version: Mapped[str | None] = mapped_column(String(40))
+    camel_version: Mapped[str | None] = mapped_column(String(40))
+    model_manifest: Mapped[dict[str, object] | None] = mapped_column(JsonType)
+    prompt_manifest: Mapped[dict[str, object] | None] = mapped_column(JsonType)
+
+
+class AnalysisEventRecord(Base):
+    """One persisted stage transition.
+
+    PostgreSQL is the system of record for progress, not Redis. A stream that
+    reconnects after a broker outage replays from here, and `sequence` doubles
+    as the SSE `Last-Event-ID`.
+    """
+
+    __tablename__ = "analysis_events"
+    __table_args__ = (
+        UniqueConstraint("analysis_run_id", "sequence", name="uq_analysis_event_sequence"),
+        Index("ix_analysis_events_run_sequence", "analysis_run_id", "sequence"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24))
+    current_stage: Mapped[str] = mapped_column(String(32))
+    completed_stages: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    skipped_stages: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    percent: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(String(300))
+    warnings: Mapped[list[dict[str, object]]] = mapped_column(JsonType, default=list)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    correlation_id: Mapped[UUID] = mapped_column(Uuid, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentRun(Base):
+    """One council execution inside an analysis run."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        UniqueConstraint("analysis_run_id", "agent_type", name="uq_agent_run_type"),
+        CheckConstraint("status IN ('completed', 'failed', 'skipped')", name="ck_agent_run_status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    agent_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16))
+    model_id: Mapped[str] = mapped_column(String(120))
+    prompt_version: Mapped[str] = mapped_column(String(80))
+    cohort_version: Mapped[str | None] = mapped_column(String(80))
+    seed: Mapped[int] = mapped_column(Integer)
+    persona_count: Mapped[int] = mapped_column(Integer, default=0)
+    round_limit: Mapped[int] = mapped_column(Integer, default=0)
+    token_budget: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    schema_failures: Mapped[int] = mapped_column(Integer, default=0)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentInstance(Base):
+    """A single personality instance within a council run."""
+
+    __tablename__ = "agent_instances"
+    __table_args__ = (
+        Index("ix_agent_instances_run_order", "agent_run_id", "activation_order"),
+        CheckConstraint(
+            "outcome IN ('completed', 'failed', 'skipped')", name="ck_agent_instance_outcome"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    agent_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    agent_id: Mapped[str] = mapped_column(String(64))
+    role: Mapped[str] = mapped_column(String(32))
+    archetype: Mapped[str | None] = mapped_column(String(64))
+    profile_version: Mapped[str] = mapped_column(String(80))
+    model_id: Mapped[str] = mapped_column(String(120))
+    allowed_actions: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    activation_order: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    outcome: Mapped[str] = mapped_column(String(16))
+
+
+class AgentArtifact(Base):
+    """A schema-validated artifact emitted by a council.
+
+    Raw conversation is not copied here. docs/10 keeps the transcript in the
+    trace object and stores the typed result plus a checksum, so a report can be
+    reconciled without duplicating a whole deliberation into the database.
+    """
+
+    __tablename__ = "agent_artifacts"
+    __table_args__ = (
+        Index("ix_agent_artifacts_run_type", "analysis_run_id", "artifact_type"),
+        CheckConstraint(
+            "validation_status IN ('valid', 'rejected')", name="ck_agent_artifact_validation"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    agent_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    artifact_type: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, object]] = mapped_column(JsonType)
+    source_artifact_ids: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    validation_status: Mapped[str] = mapped_column(String(16))
+    checksum: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentTraceArtifact(Base):
+    """Pointer to one run's OASIS trace, never the trace content itself."""
+
+    __tablename__ = "agent_trace_artifacts"
+    __table_args__ = (UniqueConstraint("object_key", name="uq_agent_trace_object_key"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    environment_id: Mapped[str] = mapped_column(String(120))
+    object_key: Mapped[str] = mapped_column(String(500))
+    checksum: Mapped[str | None] = mapped_column(String(64))
+    byte_size: Mapped[int | None] = mapped_column(BigInteger)
+    retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    access_scope: Mapped[str] = mapped_column(String(32), default="owner_only")
+    manifest: Mapped[dict[str, object]] = mapped_column(JsonType)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class EvidenceItem(Base):

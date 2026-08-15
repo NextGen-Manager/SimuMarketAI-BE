@@ -6,6 +6,7 @@ from app.repositories.business import BusinessRepository
 from app.repositories.education import EducationRepository
 from app.repositories.identity import IdentityRepository
 from app.services.analysis import AnalysisService
+from app.services.analysis_queue import AnalysisDispatcher
 from app.services.auth import AuthService
 from app.services.business import BusinessService
 from app.services.education import EducationService
@@ -36,6 +37,9 @@ def build_education_service(session: AsyncSession, identity: IdentityContext) ->
 
 
 def build_analysis_service(
-    session: AsyncSession, identity: IdentityContext, settings: Settings
+    session: AsyncSession,
+    identity: IdentityContext,
+    settings: Settings,
+    dispatcher: AnalysisDispatcher | None = None,
 ) -> AnalysisService:
-    return AnalysisService(session, identity, settings)
+    return AnalysisService(session, identity, settings, dispatcher)
