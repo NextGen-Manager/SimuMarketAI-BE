@@ -10,12 +10,18 @@ services:
       DATABASE_URL: postgresql+asyncpg://simumarket:simumarket@postgres:5432/simumarket
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: http://localhost:3000
+      OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
+      OBJECT_STORAGE_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      OBJECT_STORAGE_ACCESS_KEY: simumarket
+      OBJECT_STORAGE_SECRET_KEY: development-object-storage-secret
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   # docs/11 keeps the worker off the API container so a slow simulation cannot
@@ -36,7 +42,7 @@ services:
       - app.workers.celery_app
       - worker
       - --loglevel=info
-      - --queues=analysis
+      - --queues=analysis,artifacts
       # One task at a time: a run holds a provider budget, and prefetching a
       # second one only makes queue age harder to read.
       - --concurrency=1
@@ -46,6 +52,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://simumarket:simumarket@postgres:5432/simumarket
       REDIS_URL: redis://redis:6379/0
       OASIS_TRACE_ROOT: /var/lib/simumarket/oasis-traces
+      OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
+      OBJECT_STORAGE_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      OBJECT_STORAGE_ACCESS_KEY: simumarket
+      OBJECT_STORAGE_SECRET_KEY: development-object-storage-secret
     volumes:
       # OASIS writes one trace directory per run. Keeping them on a named volume
       # means retention is a deliberate job, not an implicit container restart.
@@ -54,6 +64,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   # The reconciler from docs/11. Without a beat process, a run whose dispatch
@@ -77,11 +89,35 @@ services:
       DEBUG: "true"
       DATABASE_URL: postgresql+asyncpg://simumarket:simumarket@postgres:5432/simumarket
       REDIS_URL: redis://redis:6379/0
+      OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
+      OBJECT_STORAGE_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      OBJECT_STORAGE_ACCESS_KEY: simumarket
+      OBJECT_STORAGE_SECRET_KEY: development-object-storage-secret
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: simumarket
+      MINIO_ROOT_PASSWORD: development-object-storage-secret
+      MINIO_API_CORS_ALLOW_ORIGIN: http://localhost:3000
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - object-storage-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   postgres:
     # pgvector ships preinstalled so the extension can be enabled by migration
@@ -117,3 +153,4 @@ services:
 volumes:
   postgres-data:
   oasis-traces:
+  object-storage-data:
