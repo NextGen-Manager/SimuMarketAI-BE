@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+import yaml
 from fastapi import FastAPI
 from sqlalchemy import select
 
 from app.core.config import Settings
 from app.persistence.models import AnalysisReportRecord, AnalysisRun, EvidenceItem
 from app.repositories.analysis import AnalysisRepository
+from app.services.analysis_pipeline import TRANSIENT_ERRORS
 from app.workers.celery_app import create_celery_app
 from tests.support.api import (
     analysis_payload,
@@ -19,7 +23,20 @@ from tests.support.api import (
     complete_required_education,
     register,
     run_worker,
+    use_evidence_provider,
 )
+
+
+def test_compose_starts_worker_processes_inside_the_project_environment() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+
+    for service_name in ("worker", "beat"):
+        command = compose["services"][service_name]["command"]
+        assert command[:4] == ["uv", "run", "--no-sync", "celery"]
+
+    assert "--schedule=/tmp/celerybeat-schedule" in compose["services"]["beat"]["command"]
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    assert "USER simumarket" in dockerfile
 
 
 async def test_repeated_requests_with_one_key_execute_one_run(
@@ -155,7 +172,86 @@ def test_celery_task_is_registered_and_needs_no_broker() -> None:
     assert app.conf.worker_prefetch_multiplier == 1
     assert app.conf.accept_content == ["json"]
 
-    from app.workers.analysis import run_analysis
+    from app.workers.analysis import recover_analyses, run_analysis
 
     assert run_analysis.name == "analysis.run"
-    assert run_analysis.max_retries == 3
+    # Transient failures are the only ones retried, and the task must actually
+    # be able to see them: the pipeline re-raises them instead of recording a
+    # terminal `failed`.
+    assert set(run_analysis.autoretry_for) == set(TRANSIENT_ERRORS)
+
+    # docs/11's reconciler is scheduled, not something an operator has to
+    # remember to run.
+    assert recover_analyses.name == "analysis.recover"
+    schedule = app.conf.beat_schedule["analysis-recover-stuck-runs"]
+    assert schedule["task"] == "analysis.recover"
+    assert schedule["schedule"] == float(settings.analysis_recovery_interval_seconds)
+
+
+class _UnreachableProvider:
+    """An evidence provider whose network is down."""
+
+    provider_id = "test-unreachable"
+    is_fixture = True
+
+    async def collect(self, requests: Any) -> Any:
+        raise ConnectionError("evidence provider unreachable")
+
+
+async def test_a_transient_failure_leaves_the_run_retryable_not_failed(
+    database_app: FastAPI,
+) -> None:
+    """A network blip is not a verdict on the analysis.
+
+    Recording `failed` here would both lie about the run and make Celery's
+    `autoretry_for` unreachable, because the exception would never leave the
+    pipeline. The run returns to `queued`, reserves the next attempt, and the
+    error propagates.
+    """
+    use_evidence_provider(database_app, _UnreachableProvider())
+
+    async with client(database_app) as owner:
+        await register(owner, "owner@example.com", "Pemilik")
+        await complete_required_education(database_app, owner)
+        created = await owner.post("/v1/analyses", json=analysis_payload())
+        analysis_id = created.json()["analysis_id"]
+
+    with pytest.raises(ConnectionError):
+        await run_worker(database_app, analysis_id)
+
+    async with database_app.state.test_session_factory() as session:
+        run = await session.scalar(select(AnalysisRun).where(AnalysisRun.id == UUID(analysis_id)))
+
+    assert run is not None
+    assert run.status == "queued"
+    assert run.failure_code is None
+    assert run.attempt_count == 2
+    # A dispatch deadline lets the reconciler retry if Celery loses its own
+    # redelivery without racing it immediately.
+    assert run.lease_expires_at is not None
+
+
+async def test_transient_failures_stop_after_the_configured_attempt_limit(
+    database_app: FastAPI,
+) -> None:
+    use_evidence_provider(database_app, _UnreachableProvider())
+
+    async with client(database_app) as owner:
+        await register(owner, "owner@example.com", "Pemilik")
+        await complete_required_education(database_app, owner)
+        created = await owner.post("/v1/analyses", json=analysis_payload())
+        analysis_id = created.json()["analysis_id"]
+
+    for _ in range(database_app.state.test_settings.analysis_max_attempts):
+        with pytest.raises(ConnectionError):
+            await run_worker(database_app, analysis_id)
+
+    async with database_app.state.test_session_factory() as session:
+        run = await session.scalar(select(AnalysisRun).where(AnalysisRun.id == UUID(analysis_id)))
+
+    assert run is not None
+    assert run.status == "failed"
+    assert run.failure_code == "worker_lost"
+    assert run.attempt_count == database_app.state.test_settings.analysis_max_attempts
+    assert run.lease_expires_at is None
+    assert any(item["code"] == "worker_lost" for item in run.warnings)
