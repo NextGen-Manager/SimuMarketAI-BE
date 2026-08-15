@@ -1,10 +1,12 @@
 """Deterministic stand-in for the live OASIS runtime.
 
 CI has no provider key and must still exercise the whole simulation path, so
-this adapter walks the same four councils, calls the same deterministic finance
-tool, writes the same unique SQLite trace, and emits raw dictionaries that go
-through the same schema validation as live output. What it does not do is call
-a model.
+this is a `CouncilRuntime`, not a shortcut around one. It is driven by the same
+`CouncilOrchestrator` as the live adapter, which means CI really runs the docs/04
+protocol: private baseline interview, stimulus exposure, interaction, controlled
+intervention, final ballot, the seeded activation subset, the token and
+wall-clock budgets, the upstream artifact hand-off, and the opinion-shift
+arithmetic. What it does not do is call a model.
 
 It is fake, so it carries `is_fake = True` and `select_oasis_adapter` refuses it
 in staging and production for exactly the reason a fixture evidence provider is
@@ -21,49 +23,207 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from app.domain.agents import (
-    AGENT_ROLES,
-    AgentInstanceRecord,
     AgentRole,
-    AgentRunRecord,
     FinanceTool,
-    FinanceToolCall,
-    OasisBudgetExceededError,
     OasisError,
-    OasisTimeoutError,
     RunManifest,
     SimulationOutcome,
     SimulationRequest,
 )
-from app.integrations.oasis.prompts import (
-    PROFILE_VERSION,
-    CouncilMember,
-    build_prompt,
-    council_for,
+from app.integrations.oasis.council_runtime import (
+    ACTION_CREATE_COMMENT,
+    ACTION_DISLIKE_POST,
+    ACTION_DO_NOTHING,
+    ACTION_LIKE_POST,
+    ACTION_PURCHASE_PRODUCT,
+    AgentReply,
+    SocialActionResult,
 )
-from app.integrations.oasis.validation import validate_council_payload
+from app.integrations.oasis.fake_payloads import (
+    finance_payload,
+    market_payload,
+    persona_ballot,
+    report_payload,
+)
+from app.integrations.oasis.orchestration_support import build_roster
+from app.integrations.oasis.orchestrator import CouncilOrchestrator
+from app.integrations.oasis.prompts import CouncilMember
 
-# A fixed, small token cost per instance keeps budget enforcement testable
-# without pretending to predict what a model would actually consume.
+# A fixed, small token cost per reply keeps budget enforcement testable without
+# pretending to predict what a model would actually consume.
 TOKENS_PER_INSTANCE = 320
 
-OBJECTION_LABELS: dict[str, str] = {
-    "price_above_comfort": "Harga di atas batas nyaman",
-    "portion_unclear": "Ukuran porsi belum jelas",
-    "queue_time": "Khawatir waktu tunggu",
-    "menu_variety": "Pilihan menu terbatas",
-}
+# Which action a persona takes when activated, derived from seed and position so
+# the same manifest reproduces the same reaction counts.
+ROUND_ACTIONS = (
+    ACTION_LIKE_POST,
+    ACTION_CREATE_COMMENT,
+    ACTION_DO_NOTHING,
+    ACTION_PURCHASE_PRODUCT,
+    ACTION_DISLIKE_POST,
+)
 
-OBJECTION_CODES = tuple(OBJECTION_LABELS)
 
-CHOICES = ("purchase", "consider", "reject")
+class FakeCouncilRuntime:
+    """A runtime that answers from fixtures and writes a real trace."""
+
+    def __init__(
+        self,
+        *,
+        request: SimulationRequest,
+        manifest: RunManifest,
+        roster: tuple[tuple[AgentRole, CouncilMember], ...],
+        failing_roles: frozenset[AgentRole],
+        invalid_roles: frozenset[AgentRole],
+        stage_delay_seconds: float,
+        narrative_extra_number: int | None,
+        token_cost: int,
+    ) -> None:
+        self._request = request
+        self._manifest = manifest
+        self._roster = roster
+        self._failing = failing_roles
+        self._invalid = invalid_roles
+        self._delay = stage_delay_seconds
+        self._narrative_extra_number = narrative_extra_number
+        self._token_cost = token_cost
+        self._trace: _TraceWriter | None = None
+        self._restricted: dict[int, tuple[str, ...]] = {}
+        self._drafts: dict[AgentRole, int] = {}
+
+    # ------------------------------------------------------------ lifecycle
+
+    async def start(self) -> None:
+        self._trace = _TraceWriter(Path(self._manifest.trace.object_key))
+
+    async def close(self) -> None:
+        if self._trace is not None:
+            self._trace.close()
+
+    async def restrict_actions(self, agent_index: int, actions: Sequence[str]) -> None:
+        self._restricted[agent_index] = tuple(actions)
+
+    # --------------------------------------------------------------- rounds
+
+    async def interview(
+        self,
+        agent_index: int,
+        prompt: str,
+        *,
+        round_index: int,
+        purpose: str,
+    ) -> AgentReply:
+        await self._sleep()
+        role, member = self._roster[agent_index]
+        self._write(
+            agent_id=member.agent_id,
+            role=role,
+            round_index=round_index,
+            action=f"interview:{purpose}",
+            payload={"prompt_length": len(prompt)},
+        )
+        if role in self._failing:
+            # No JSON at all: the orchestrator's schema path handles it, rather
+            # than a shortcut that skips the path being tested.
+            return AgentReply(content="", tokens=self._token_cost)
+        if role in self._invalid:
+            return AgentReply(
+                content=json.dumps({"unexpected": "payload"}), tokens=self._token_cost
+            )
+        payload = self._payload(role, agent_index, purpose, prompt)
+        return AgentReply(content=json.dumps(payload, ensure_ascii=False), tokens=self._token_cost)
+
+    async def publish_stimulus(
+        self,
+        payload: Mapping[str, object],
+        *,
+        round_index: int,
+        label: str,
+    ) -> None:
+        await self._sleep()
+        self._write(
+            agent_id="orchestrator",
+            role="customer_persona",
+            round_index=round_index,
+            action=f"publish:{label}",
+            payload=dict(payload),
+        )
+
+    async def step(
+        self,
+        agent_indices: Sequence[int],
+        *,
+        round_index: int,
+    ) -> Mapping[int, SocialActionResult]:
+        await self._sleep()
+        taken: dict[int, SocialActionResult] = {}
+        for position, index in enumerate(agent_indices):
+            action = ROUND_ACTIONS[(self._request.seed + index + round_index) % len(ROUND_ACTIONS)]
+            allowed = self._restricted.get(index, ())
+            if allowed and action not in allowed:
+                action = ACTION_DO_NOTHING
+            taken[index] = SocialActionResult(
+                action=action,
+                tokens=self._token_cost,
+                duration_ms=max(1, int(self._delay * 1_000)),
+            )
+            self._write(
+                agent_id=self._roster[index][1].agent_id,
+                role="customer_persona",
+                round_index=round_index,
+                action=action,
+                payload={"activation_order": position},
+            )
+        return taken
+
+    # -------------------------------------------------------------- payloads
+
+    def _payload(
+        self, role: AgentRole, agent_index: int, purpose: str, prompt: str
+    ) -> dict[str, Any]:
+        if role == "customer_persona":
+            return persona_ballot(
+                self._request,
+                self._roster[agent_index][1],
+                agent_index,
+                baseline=purpose == "baseline_interview",
+            )
+        # Council members deliberate in sequence; each one emits the whole
+        # artifact so the last valid output is the council's position.
+        order = self._drafts.get(role, 0)
+        self._drafts[role] = order + 1
+        if role == "market_analyst":
+            return market_payload(self._request)
+        if role == "finance":
+            return finance_payload(self._request, prompt)
+        return report_payload(prompt, extra_number=self._narrative_extra_number)
+
+    async def _sleep(self) -> None:
+        if self._delay > 0:
+            await asyncio.sleep(self._delay)
+
+    def _write(
+        self,
+        *,
+        agent_id: str,
+        role: str,
+        round_index: int,
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._trace is not None:
+            self._trace.write(
+                agent_id=agent_id,
+                role=role,
+                round_index=round_index,
+                action=action,
+                payload=payload,
+            )
 
 
 class FakeOasisAdapter:
