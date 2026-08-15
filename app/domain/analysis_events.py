@@ -46,5 +46,9 @@ class AnalysisEvent(BaseModel):
     percent: int = Field(ge=0, le=100)
     message: str
     warnings: list[AnalysisEventWarning] = Field(default_factory=list)
+    # Carried on the event itself so a client that only ever sees the stream can
+    # name the failure. Deriving it from the first warning was wrong: a run can
+    # fail with warnings that describe something else entirely.
+    failure_code: str | None = None
     correlation_id: UUID
     occurred_at: datetime

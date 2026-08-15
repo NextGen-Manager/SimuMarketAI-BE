@@ -32,6 +32,9 @@ EVENT_FIELDS = {
     "percent",
     "message",
     "warnings",
+    # A terminal failure names itself on the event. A client that only ever sees
+    # the stream would otherwise have to guess the reason from the first warning.
+    "failure_code",
     "correlation_id",
     "occurred_at",
 }
