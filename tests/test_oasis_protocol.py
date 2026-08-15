@@ -488,3 +488,96 @@ async def test_a_failed_upstream_council_is_not_claimed_as_a_source() -> None:
         "FinanceReview",
     }
 
+
+async def test_each_council_member_sees_the_previous_member_draft() -> None:
+    """Otherwise "Skeptic challenges" has nothing to challenge."""
+    request = _request()
+    runtime = _stub(request)
+    await _run(runtime, request)
+    market = [
+        call.prompt
+        for call in runtime.calls
+        if call.kind == "interview" and call.purpose == "deliberation:market_analyst"
+    ]
+    assert len(market) == 3
+    assert "draft" not in market[0]
+    assert "draft" in market[1]
+    assert "draft" in market[2]
+
+
+async def test_the_finance_council_only_ever_sees_calculator_output() -> None:
+    request = _request()
+    runtime = _stub(request)
+    outcome = await _run(runtime, request)
+    finance_prompts = [
+        call.prompt
+        for call in runtime.calls
+        if call.kind == "interview" and call.purpose == "deliberation:finance"
+    ]
+    assert finance_prompts
+    for prompt in finance_prompts:
+        assert "finance-volume-25" in prompt
+        assert "finance-volume-40" in prompt
+        assert "finance-volume-55" in prompt
+    review = outcome.finance_review
+    assert review is not None
+    known = {call.tool_call_id for call in review.tool_calls}
+    for critique in review.critiques:
+        assert set(critique.tool_call_ids) <= known
+
+
+async def test_action_allowlists_are_applied_per_agent_not_globally() -> None:
+    request = _request()
+    runtime = _stub(request)
+    await _run(runtime, request)
+    roster = build_roster(request)
+    assert len(runtime.restricted) == len(roster)
+    persona_index = next(i for i, (role, _) in enumerate(roster) if role == "customer_persona")
+    finance_index = next(i for i, (role, _) in enumerate(roster) if role == "finance")
+    assert ACTION_LIKE_POST in runtime.restricted[persona_index]
+    assert ACTION_LIKE_POST not in runtime.restricted[finance_index]
+    assert ACTION_DO_NOTHING not in runtime.restricted[finance_index]
+
+
+async def test_instance_tokens_are_per_instance_not_cumulative() -> None:
+    request = _request()
+    runtime = _stub(request, tokens_per_reply=100)
+    outcome = await _run(runtime, request)
+    market_run = next(run for run in outcome.agent_runs if run.role == "market_analyst")
+    assert [instance.total_tokens for instance in market_run.instances] == [100, 100, 100]
+    assert market_run.total_tokens == 300
+    persona_run = next(run for run in outcome.agent_runs if run.role == "customer_persona")
+    assert all(instance.total_tokens >= 200 for instance in persona_run.instances)
+    assert persona_run.total_tokens > 12 * 200
+
+
+async def test_social_action_tokens_are_charged_to_the_hard_budget() -> None:
+    request = _request(tokens=3_200)
+    runtime = _stub(request, tokens_per_reply=100, tokens_per_action=1_000)
+    with pytest.raises(OasisBudgetExceededError):
+        await _run(runtime, request)
+
+
+async def test_council_duration_is_measured_not_left_at_zero() -> None:
+    request = _request()
+    runtime = _stub(request, reply_delay_seconds=0.005)
+    outcome = await _run(runtime, request)
+    assert all(run.duration_ms > 0 for run in outcome.agent_runs)
+    market_run = next(run for run in outcome.agent_runs if run.role == "market_analyst")
+    assert all(instance.duration_ms > 0 for instance in market_run.instances)
+
+
+async def test_the_token_budget_stops_a_run_that_would_exceed_it() -> None:
+    request = _request(tokens=500)
+    runtime = _stub(request, tokens_per_reply=100)
+    with pytest.raises(OasisBudgetExceededError):
+        await _run(runtime, request)
+    assert runtime.closed is True
+
+
+async def test_the_runtime_is_always_closed() -> None:
+    request = _request()
+    runtime = _stub(request)
+    await _run(runtime, request)
+    assert runtime.started is True
+    assert runtime.closed is True
