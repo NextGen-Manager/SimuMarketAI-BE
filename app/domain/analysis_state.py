@@ -11,6 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, get_args
 
+WORKER_LOST_FAILURE_CODE = "worker_lost"
+WORKER_LOST_WARNING = "worker_lost"
+WORKER_LOST_MESSAGE = (
+    "Proses analisis berhenti sebelum selesai dan sudah dicoba ulang sampai batas maksimum."
+)
+
 AnalysisStage = Literal[
     "queued",
     "collecting_evidence",

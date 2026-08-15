@@ -45,6 +45,16 @@ def create_celery_app() -> Celery:
         task_serializer="json",
         result_serializer="json",
         accept_content=["json"],
+        # docs/11: a lost queued job is reconciled from PostgreSQL state. Nothing
+        # else can notice a task that never reached the broker or a worker that
+        # died holding one, so the reconciler runs on a schedule.
+        beat_schedule={
+            "analysis-recover-stuck-runs": {
+                "task": "analysis.recover",
+                "schedule": float(settings.analysis_recovery_interval_seconds),
+                "options": {"queue": settings.celery_analysis_queue},
+            }
+        },
     )
     return app
 

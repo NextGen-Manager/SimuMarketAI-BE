@@ -110,8 +110,27 @@ class AnalysisService:
             await self._require_same_input(run, analysis_input)
             return self._accepted(run)
 
-        self._dispatcher.dispatch(run.id, run.correlation_id)
+        self._dispatch(run)
         return self._accepted(run)
+
+    def _dispatch(self, run: AnalysisRun) -> None:
+        """Hand the run to the worker, tolerating a broker that is not there.
+
+        The run is already committed, so failing the request now would report an
+        error for work that is in fact durably queued. It is left `queued` with
+        no lease, and `app.services.analysis_recovery` requeues it — which is
+        exactly the reconciliation from PostgreSQL state that docs/11 requires.
+        """
+        try:
+            self._dispatcher.dispatch(run.id, run.correlation_id)
+        except Exception:
+            logger.exception(
+                "analysis_dispatch_failed",
+                extra={
+                    "analysis_id": str(run.id),
+                    "correlation_id": str(run.correlation_id),
+                },
+            )
 
     async def list_analyses(self) -> list[AnalysisListItem]:
         await require_owner_workspace(self._businesses, self._identity)
@@ -258,6 +277,7 @@ class AnalysisService:
             percent=record.percent,
             message=record.message,
             warnings=[AnalysisEventWarning.model_validate(item) for item in record.warnings],
+            failure_code=record.failure_code,
             correlation_id=record.correlation_id,
             occurred_at=record.occurred_at,
         )
@@ -277,6 +297,7 @@ class AnalysisService:
             percent=plan.percent(completed),
             message=STAGE_MESSAGES[current],
             warnings=[AnalysisEventWarning.model_validate(item) for item in run.warnings],
+            failure_code=run.failure_code,
             correlation_id=run.correlation_id,
             occurred_at=run.completed_at or run.started_at or run.created_at,
         )
