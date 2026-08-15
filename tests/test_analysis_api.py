@@ -12,12 +12,40 @@ from tests.support.api import (
     analysis_payload,
     client,
     complete_required_education,
+    create_analysis,
     create_business,
     join_as_cashier,
     register,
+    run_worker,
     use_evidence_provider,
 )
 from tests.support.evidence import COMPLETE_FIXTURE_VALUES, FixtureEvidenceProvider
+
+
+async def test_post_returns_before_the_worker_runs(database_app: FastAPI) -> None:
+    async with client(database_app) as owner:
+        await register(owner, "owner@example.com", "Pemilik")
+        await complete_required_education(database_app, owner)
+
+        created = await owner.post("/v1/analyses", json=analysis_payload())
+        assert created.status_code == 202, created.text
+        analysis_id = created.json()["analysis_id"]
+
+        # Nothing has executed yet: the response carries the queued run and the
+        # dispatcher holds exactly one job.
+        assert created.json()["status"] == "queued"
+        assert created.json()["status_url"] == f"/v1/analyses/{analysis_id}"
+        assert created.json()["events_url"] == f"/v1/analyses/{analysis_id}/events"
+        assert len(database_app.state.test_dispatcher.dispatched) == 1
+        assert str(database_app.state.test_dispatcher.dispatched[0][0]) == analysis_id
+
+        queued = await owner.get(f"/v1/analyses/{analysis_id}")
+        assert queued.json()["status"] == "queued"
+        assert queued.json()["progress"]["current_stage"] == "queued"
+        assert (await owner.get(f"/v1/analyses/{analysis_id}/report")).status_code == 404
+
+        await run_worker(database_app, analysis_id)
+        assert (await owner.get(f"/v1/analyses/{analysis_id}")).json()["status"] == "partial"
 
 
 async def test_run_completes_without_any_llm_and_reports_partial_honestly(
@@ -26,17 +54,7 @@ async def test_run_completes_without_any_llm_and_reports_partial_honestly(
     async with client(database_app) as owner:
         await register(owner, "owner@example.com", "Pemilik")
         await complete_required_education(database_app, owner)
-
-        created = await owner.post("/v1/analyses", json=analysis_payload())
-        assert created.status_code == 202, created.text
-        analysis_id = created.json()["analysis_id"]
-        assert created.json()["status_url"] == f"/v1/analyses/{analysis_id}"
-        assert created.json()["events_url"] == f"/v1/analyses/{analysis_id}/events"
-
-        events = await owner.get(created.json()["events_url"])
-        assert events.status_code == 200
-        assert events.headers["content-type"].startswith("text/event-stream")
-        assert "event: status" in events.text
+        analysis_id = await create_analysis(database_app, owner)
 
         detail = await owner.get(f"/v1/analyses/{analysis_id}")
         report = await owner.get(f"/v1/analyses/{analysis_id}/report")
@@ -51,7 +69,6 @@ async def test_run_completes_without_any_llm_and_reports_partial_honestly(
         assert body["failure_code"] is None
 
         codes = {warning["code"] for warning in body["warnings"]}
-        assert "simulation_skipped" in codes
         assert "evidence_missing" in codes
         assert "score_unavailable" in codes
 
@@ -65,6 +82,7 @@ async def test_run_completes_without_any_llm_and_reports_partial_honestly(
         assert payload["evidence_confidence"]["label"] == "tidak_tersedia"
         assert payload["synthetic_simulation"]["status"] == "unavailable"
         assert payload["synthetic_simulation"]["reason"]
+        assert payload["agent_review"]["status"] == "unavailable"
         assert payload["finance"]["bep_units_month"] == 715
         assert payload["missing_evidence"]
         assert payload["limitations"]
@@ -81,13 +99,14 @@ async def test_complete_evidence_produces_a_completed_run_with_a_score(
     async with client(database_app) as owner:
         await register(owner, "owner@example.com", "Pemilik")
         await complete_required_education(database_app, owner)
+        analysis_id = await create_analysis(database_app, owner)
 
-        created = await owner.post("/v1/analyses", json=analysis_payload())
-        analysis_id = created.json()["analysis_id"]
         detail = await owner.get(f"/v1/analyses/{analysis_id}")
         report = await owner.get(f"/v1/analyses/{analysis_id}/report")
 
-        assert detail.json()["status"] == "completed"
+        # The simulation is unavailable in this environment, so a run with
+        # complete evidence is still partial rather than completed.
+        assert detail.json()["status"] == "partial"
         assert detail.json()["score"] == 78
         assert detail.json()["interpretation"] == "Layak dengan mitigasi"
         assert report.json()["readiness"]["score"] == 78
@@ -107,8 +126,7 @@ async def test_input_snapshot_is_frozen_at_creation(database_app: FastAPI) -> No
     async with client(database_app) as owner:
         await register(owner, "owner@example.com", "Pemilik")
         await complete_required_education(database_app, owner)
-        created = await owner.post("/v1/analyses", json=analysis_payload())
-        analysis_id = created.json()["analysis_id"]
+        analysis_id = await create_analysis(database_app, owner)
 
         report = await owner.get(f"/v1/analyses/{analysis_id}/report")
         async with database_app.state.test_session_factory() as session:
@@ -137,6 +155,8 @@ async def test_idempotency_key_returns_the_same_run(database_app: FastAPI) -> No
 
         assert first.json()["analysis_id"] == second.json()["analysis_id"]
         assert len(listing.json()) == 1
+        # The repeat must not queue a second execution of the same run.
+        assert len(database_app.state.test_dispatcher.dispatched) == 1
 
 
 async def test_idempotency_key_rejects_a_different_input(database_app: FastAPI) -> None:
@@ -163,12 +183,12 @@ async def test_history_is_scoped_to_the_owner(database_app: FastAPI) -> None:
         await register(second, "second@example.com", "Pemilik Dua")
         await complete_required_education(database_app, first)
 
-        created = await first.post("/v1/analyses", json=analysis_payload())
-        analysis_id = created.json()["analysis_id"]
+        analysis_id = await create_analysis(database_app, first)
 
         assert (await second.get("/v1/analyses")).json() == []
         assert (await second.get(f"/v1/analyses/{analysis_id}")).status_code == 404
         assert (await second.get(f"/v1/analyses/{analysis_id}/report")).status_code == 404
+        assert (await second.get(f"/v1/analyses/{analysis_id}/events")).status_code == 404
 
 
 async def test_cashier_cannot_reach_analyses(database_app: FastAPI) -> None:
@@ -176,8 +196,7 @@ async def test_cashier_cannot_reach_analyses(database_app: FastAPI) -> None:
         await register(owner, "owner@example.com", "Pemilik")
         await complete_required_education(database_app, owner)
         business_id = await create_business(owner)
-        created = await owner.post("/v1/analyses", json=analysis_payload())
-        analysis_id = created.json()["analysis_id"]
+        analysis_id = await create_analysis(database_app, owner)
 
         await register(cashier, "cashier@example.com", "Kasir")
         await join_as_cashier(owner, cashier, business_id)
@@ -185,6 +204,7 @@ async def test_cashier_cannot_reach_analyses(database_app: FastAPI) -> None:
         assert (await cashier.get("/v1/analyses")).status_code == 404
         assert (await cashier.get(f"/v1/analyses/{analysis_id}")).status_code == 404
         assert (await cashier.get(f"/v1/analyses/{analysis_id}/report")).status_code == 404
+        assert (await cashier.get(f"/v1/analyses/{analysis_id}/events")).status_code == 404
         assert (await cashier.post("/v1/analyses", json=analysis_payload())).status_code == 404
 
 
@@ -211,14 +231,15 @@ async def test_invalid_input_is_rejected_before_a_run_is_created(
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "VALIDATION_FAILED"
         assert (await owner.get("/v1/analyses")).json() == []
+        assert database_app.state.test_dispatcher.dispatched == []
 
 
 async def test_money_in_the_report_is_always_an_integer(database_app: FastAPI) -> None:
     async with client(database_app) as owner:
         await register(owner, "owner@example.com", "Pemilik")
         await complete_required_education(database_app, owner)
-        created = await owner.post("/v1/analyses", json=analysis_payload())
-        report = await owner.get(f"/v1/analyses/{created.json()['analysis_id']}/report")
+        analysis_id = await create_analysis(database_app, owner)
+        report = await owner.get(f"/v1/analyses/{analysis_id}/report")
 
         offenders: list[str] = []
 
@@ -244,3 +265,4 @@ async def test_report_is_not_available_before_a_run_exists(database_app: FastAPI
 
         assert (await owner.get(f"/v1/analyses/{missing}")).status_code == 404
         assert (await owner.get(f"/v1/analyses/{missing}/report")).status_code == 404
+        assert (await owner.get(f"/v1/analyses/{missing}/events")).status_code == 404

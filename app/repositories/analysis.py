@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.auth import IdentityContext
 from app.persistence.models import (
+    AnalysisEventRecord,
     AnalysisReportRecord,
     AnalysisRun,
     EvidenceItem,
@@ -92,6 +93,27 @@ class AnalysisRepository:
                 )
             ),
         )
+
+    async def list_events(
+        self, analysis_run_id: UUID, *, after_sequence: int = 0, limit: int = 200
+    ) -> list[AnalysisEventRecord]:
+        """Replay persisted progress for one run, scoped to its owner.
+
+        The join is what makes the SSE stream tenant-safe: another user's run
+        yields no rows, exactly as if it did not exist.
+        """
+        rows = await self._session.scalars(
+            select(AnalysisEventRecord)
+            .join(AnalysisRun, AnalysisRun.id == AnalysisEventRecord.analysis_run_id)
+            .where(
+                AnalysisEventRecord.analysis_run_id == analysis_run_id,
+                AnalysisEventRecord.sequence > after_sequence,
+                AnalysisRun.user_id == self._identity.user_id,
+            )
+            .order_by(AnalysisEventRecord.sequence)
+            .limit(limit)
+        )
+        return list(rows)
 
     async def flush(self) -> None:
         await self._session.flush()

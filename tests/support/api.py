@@ -9,11 +9,10 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.api.analysis_dependencies import get_analysis_service
-from app.api.dependencies import AppSettings, CurrentIdentity, DatabaseSession
+from app.domain.agents import OasisAdapter
 from app.domain.evidence import EvidenceProvider
 from app.persistence.models import EducationModule, EducationQuestion
-from app.services.analysis import AnalysisService
+from app.workers.analysis import execute_analysis
 
 PASSWORD = "kata-sandi-yang-aman"
 
@@ -50,20 +49,50 @@ async def join_as_cashier(owner: AsyncClient, cashier: AsyncClient, business_id:
 
 
 def use_evidence_provider(app: FastAPI, provider: EvidenceProvider) -> None:
-    """Point the analysis service at a test provider through DI only.
+    """Point the worker at a test provider.
 
     Production wiring is untouched: `select_evidence_provider` still refuses a
     fixture outside development and test.
     """
+    app.state.test_evidence_provider = provider
 
-    def override(
-        session: DatabaseSession,
-        identity: CurrentIdentity,
-        settings: AppSettings,
-    ) -> AnalysisService:
-        return AnalysisService(session, identity, settings, provider)
 
-    app.dependency_overrides[get_analysis_service] = override
+def use_oasis_adapter(app: FastAPI, adapter: OasisAdapter) -> None:
+    """Point the worker at a test adapter.
+
+    As with evidence, `select_oasis_adapter` still refuses a fake outside
+    development and test, so this only reaches the injected instance.
+    """
+    app.state.test_oasis_adapter = adapter
+
+
+async def run_worker(app: FastAPI, analysis_id: str) -> None:
+    """Execute the queued run the way the Celery task would.
+
+    Tests call this explicitly instead of relying on an eager broker, which is
+    what makes "the API returned before the work happened" observable: between
+    the POST and this call the run is still `queued`.
+    """
+    await execute_analysis(
+        UUID(analysis_id),
+        session_factory=app.state.test_session_factory,
+        settings=app.state.test_settings,
+        evidence_provider=app.state.test_evidence_provider,
+        oasis_adapter=app.state.test_oasis_adapter,
+        publisher=app.state.test_publisher,
+    )
+
+
+async def create_analysis(app: FastAPI, async_client: AsyncClient, /, **overrides: Any) -> str:
+    """POST an analysis and run its worker. Returns the analysis ID."""
+    headers = overrides.pop("headers", None)
+    response = await async_client.post(
+        "/v1/analyses", json=analysis_payload(**overrides), headers=headers
+    )
+    assert response.status_code == 202, response.text
+    analysis_id = str(response.json()["analysis_id"])
+    await run_worker(app, analysis_id)
+    return analysis_id
 
 
 async def seed_education_module(
