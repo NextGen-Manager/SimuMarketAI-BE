@@ -45,3 +45,133 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+      - name: Export locked production dependencies
+        run: uv export --frozen --no-dev --extra oasis --no-emit-project --output-file requirements-audit.txt
+
+      - name: Audit production dependencies
+        id: dependency-audit
+        continue-on-error: true
+        run: >-
+          uvx pip-audit
+          --requirement requirements-audit.txt
+          --disable-pip
+          --format json
+          --output dependency-audit.json
+
+      # camel-oasis 0.2.5 pins vulnerable transitive versions that cannot be
+      # upgraded independently. Keep the evidence visible while the isolated
+      # worker dependency set is remediated; never turn known findings into an
+      # implicit allowlist.
+      - name: Upload dependency audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dependency-audit
+          path: dependency-audit.json
+          if-no-files-found: error
+
+      - name: Report unresolved dependency findings
+        if: steps.dependency-audit.outcome == 'failure'
+        run: echo "::warning::Dependency findings remain in the pinned OASIS worker stack; inspect backend-dependency-audit."
+
+  database-hardening:
+    name: Migration, backup, and restore
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: simumarket
+          POSTGRES_PASSWORD: simumarket
+          POSTGRES_DB: simumarket
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U simumarket -d simumarket"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://simumarket:simumarket@localhost:5432/simumarket
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: test
+      JWT_SECRET: phase6-ci-secret-with-at-least-thirty-two-characters
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: simumarket
+      PGPASSWORD: simumarket
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client
+
+      - name: Apply and verify migrations
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Seed backup verification record
+        run: |
+          psql --dbname simumarket --set ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE phase6_restore_probe (value text PRIMARY KEY);
+          INSERT INTO phase6_restore_probe (value) VALUES ('backup-restored');
+          SQL
+
+      - name: Back up and restore into an isolated database
+        run: |
+          pg_dump --dbname simumarket --format custom --no-owner --no-acl --file backup.dump
+          createdb simumarket_restored
+          pg_restore --dbname simumarket_restored --no-owner --no-acl --exit-on-error backup.dump
+
+      - name: Verify restored schema and data
+        run: |
+          test "$(psql --dbname simumarket_restored --tuples-only --no-align --command 'SELECT value FROM phase6_restore_probe')" = "backup-restored"
+          source_version="$(psql --dbname simumarket --tuples-only --no-align --command 'SELECT version_num FROM alembic_version')"
+          restored_version="$(psql --dbname simumarket_restored --tuples-only --no-align --command 'SELECT version_num FROM alembic_version')"
+          test "$restored_version" = "$source_version"
+
+      - name: Start API for readiness load smoke
+        run: |
+          uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/simumarket-api.log 2>&1 &
+          for attempt in {1..30}; do
+            curl --fail --silent http://127.0.0.1:8000/v1/ready && exit 0
+            sleep 1
+          done
+          cat /tmp/simumarket-api.log
+          exit 1
+
+      - name: Run bounded readiness load smoke
+        run: >-
+          uv run python scripts/load_smoke.py
+          --url http://127.0.0.1:8000/v1/ready
+          --requests 200
+          --concurrency 20
+          --maximum-p95-ms 1000
