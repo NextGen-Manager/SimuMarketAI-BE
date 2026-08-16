@@ -1,0 +1,109 @@
+[project]
+name = "simumarket-ai-backend"
+version = "0.1.0"
+description = "SimuMarket AI backend: deterministic engines, OASIS integration, and API"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi==0.136.0",
+    "uvicorn[standard]>=0.34,<0.40",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "sqlalchemy[asyncio]>=2.0.36,<2.1",
+    "asyncpg>=0.30,<0.31",
+    "alembic>=1.14,<2",
+    "redis>=5.2,<6",
+    "celery>=5.4,<6",
+    "pwdlib[argon2]>=0.3,<1",
+    "pyjwt>=2.10,<3",
+    "email-validator>=2.2,<3",
+    "boto3>=1.40,<2",
+    "pillow>=10.1,<11",
+    "reportlab>=4.4,<5",
+]
+
+# The OASIS runtime is an extra, not a default dependency. `camel-oasis` pins
+# `pytest-asyncio==0.23.6` and constrains `mcp<2`, which conflicts with the API's
+# own toolchain, and it pulls a large model stack that the API process never
+# needs. Only the worker image installs it:
+#
+#     uv sync --extra oasis
+#
+# Without it, `LiveOasisAdapter` raises `OasisUnavailableError` on start and the
+# run is honestly `partial` — see `docker-compose.yml`, service `worker`.
+[project.optional-dependencies]
+oasis = [
+    "camel-oasis==0.2.5",
+    "camel-ai==0.2.78",
+    # CAMEL 0.2.78 imports FastMCP from the MCP 1.x module layout. MCP 2.x
+    # resolves successfully but fails at worker import time.
+    "mcp<2",
+]
+ocr = [
+    "paddleocr[doc-parser]>=3.3,<4",
+    "paddlepaddle>=3.2,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<1",
+    "httpx>=0.28,<1",
+    "ruff>=0.9,<1",
+    "mypy>=1.14,<2",
+    "aiosqlite>=0.20,<1",
+]
+
+# `camel-oasis` pins `pytest==8.2.0`, which the dev group cannot accept. The two
+# are genuinely never installed together — the worker image has no dev group, and
+# CI runs against the fake adapter — so uv is told to resolve them separately
+# instead of failing on a conflict that does not exist in any real environment.
+[tool.uv]
+conflicts = [[{ extra = "oasis" }, { group = "dev" }]]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Markdown carries the coding rules and documentation. Formatting the Python
+# blocks inside it rewrites prose that is deliberate.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["celery.*"]
+ignore_missing_imports = true
+
+# camel-oasis lives in the isolated spike environment, not in the backend
+# lockfile, so the live adapter imports it lazily and mypy cannot see stubs.
+[[tool.mypy.overrides]]
+module = [
+    "oasis.*",
+    "camel.*",
+    "boto3.*",
+    "botocore.*",
+    "paddleocr.*",
+    "reportlab.*",
+]
+ignore_missing_imports = true
+
+# Celery's task decorator is untyped upstream; the task body itself stays typed.
+[[tool.mypy.overrides]]
+module = ["app.workers.*"]
+disallow_untyped_decorators = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

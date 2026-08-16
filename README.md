@@ -4,7 +4,10 @@ Backend API, job orchestration, deterministic engines, dan integrasi OASIS untuk
 
 ## Status
 
-Repository ini baru diinisialisasi. Belum ada source code layanan. Desain teknis dan batas penggunaan OASIS tersedia di repository [Docs](https://github.com/NextGen-Manager/Docs).
+Fondasi Fase 0 tersedia pada branch `dev`: aplikasi FastAPI, konfigurasi environment,
+PostgreSQL, Redis, Alembic, correlation ID, bentuk error stabil, health/readiness,
+Docker Compose, test dasar, dan CI. Domain bisnis serta integrasi OASIS belum masuk
+jalur aplikasi.
 
 ## Tanggung jawab repository
 
@@ -26,7 +29,7 @@ Repository ini baru diinisialisasi. Belum ada source code layanan. Desain teknis
 - PostgreSQL
 - Redis + Celery
 - `camel-oasis` / CAMEL-AI
-- Google Gemini melalui model adapter CAMEL, dengan provider fallback di belakang interface internal
+- Google Gemini atau OpenAI melalui model adapter CAMEL, dipilih per deployment
 
 OASIS `0.2.5` pada branch utama yang diaudit mensyaratkan Python `>=3.10,<3.12`, sehingga Python 3.11 sesuai. Versi dependency harus dipin dan diuji ulang sebelum implementasi.
 
@@ -60,4 +63,46 @@ tests/
 
 ## Menjalankan layanan
 
-Belum tersedia. Ketika scaffold dibuat, README ini harus memuat setup lokal, migrasi database, worker, seed data, test, lint, serta seluruh environment variables tanpa menyertakan secret asli.
+Prasyarat: Docker Desktop, atau Python 3.11 dan `uv` untuk menjalankan tanpa container.
+
+### Docker Compose
+
+```bash
+docker compose up --build -d
+docker compose exec api uv run alembic upgrade head
+```
+
+API tersedia di `http://localhost:8000`. Pemeriksaan:
+
+```bash
+curl http://localhost:8000/v1/health
+curl http://localhost:8000/v1/ready
+```
+
+Hentikan service tanpa menghapus volume database:
+
+```bash
+docker compose down
+```
+
+### Lokal
+
+```bash
+uv sync --all-groups
+copy .env.example .env
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload
+```
+
+### Quality checks
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+uv run pytest
+```
+
+Jangan mengisi atau melakukan commit terhadap `.env`. Pilih provider dan model
+melalui `OASIS_PROVIDER` serta `OASIS_MODEL_ID`. Isi hanya `GEMINI_API_KEY` atau
+`OPENAI_API_KEY` milik provider yang dipilih ketika integrasi live dijalankan.
