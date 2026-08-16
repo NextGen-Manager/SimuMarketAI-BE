@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.core.correlation import CORRELATION_HEADER, CorrelationIdMiddleware
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging
+from app.core.security_headers import SecurityHeadersMiddleware
 from app.persistence.database import dispose_engine
 from app.persistence.redis import dispose_redis
 
@@ -40,6 +41,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=[CORRELATION_HEADER],
+    )
+    # Added last so it wraps CORS short-circuit responses as well as routes.
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        enable_hsts=settings.environment in {"staging", "production"},
     )
 
     register_error_handlers(app)

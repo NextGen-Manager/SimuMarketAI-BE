@@ -28,6 +28,7 @@ REQUESTS = [
 def settings_for(environment: str) -> Settings:
     return Settings(
         environment=environment,  # type: ignore[arg-type]
+        debug=False,
         jwt_secret="test-secret-with-at-least-thirty-two-characters",
         auth_cookie_secure=True,
     )

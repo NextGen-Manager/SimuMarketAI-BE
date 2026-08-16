@@ -125,11 +125,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_auth_settings(self) -> "Settings":
+        if "*" in self.cors_origins:
+            raise ValueError("CORS_ORIGINS harus berupa allowlist eksplisit")
         if self.environment in {"staging", "production"}:
             if self.jwt_secret == "development-only-change-me" or len(self.jwt_secret) < 32:
                 raise ValueError("JWT_SECRET harus unik dan minimal 32 karakter")
             if not self.auth_cookie_secure:
                 raise ValueError("AUTH_COOKIE_SECURE wajib aktif di staging dan production")
+            if self.debug:
+                raise ValueError("DEBUG wajib nonaktif di staging dan production")
         return self
 
     @model_validator(mode="after")

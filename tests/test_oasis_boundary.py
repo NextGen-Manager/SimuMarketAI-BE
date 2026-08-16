@@ -278,6 +278,7 @@ def test_disabling_oasis_selects_the_unavailable_adapter() -> None:
 def test_a_fake_adapter_is_refused_in_protected_environments() -> None:
     protected = Settings(
         environment="production",
+        debug=False,
         jwt_secret=SALT,
         auth_cookie_secure=True,
     )
