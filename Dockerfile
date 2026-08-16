@@ -16,9 +16,15 @@ ARG INSTALL_OASIS=0
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$INSTALL_OASIS" = "1" ]; then \
-        uv sync --frozen --no-dev --extra oasis; \
+        uv sync --frozen --no-dev --extra oasis --extra ocr; \
     else \
         uv sync --frozen --no-dev; \
+    fi
+
+RUN if [ "$INSTALL_OASIS" = "1" ]; then \
+        apt-get update \
+        && apt-get install --yes --no-install-recommends libgl1 libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*; \
     fi
 
 COPY alembic.ini ./

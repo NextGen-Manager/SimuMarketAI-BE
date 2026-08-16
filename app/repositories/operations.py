@@ -98,6 +98,8 @@ class TransactionRepository:
         gross_total_idr: int,
         client_reference: str | None,
         items: list[tuple[UUID, int, int, int]],
+        source: str = "manual",
+        receipt_import_id: UUID | None = None,
     ) -> Transaction:
         transaction = Transaction(
             business_id=self._actor.business_id,
@@ -105,8 +107,9 @@ class TransactionRepository:
             occurred_at=occurred_at,
             channel=channel,
             gross_total_idr=gross_total_idr,
-            source="manual",
+            source=source,
             client_reference=client_reference,
+            receipt_import_id=receipt_import_id,
         )
         self._session.add(transaction)
         await self._session.flush()

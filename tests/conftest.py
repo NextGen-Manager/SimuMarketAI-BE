@@ -6,13 +6,20 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.api.analysis_dependencies import get_analysis_dispatcher
+from app.api.artifact_dependencies import (
+    get_export_dispatcher,
+    get_object_storage,
+    get_receipt_dispatcher,
+)
 from app.api.dependencies import get_auth_rate_limiter
 from app.core.config import Settings, get_settings
+from app.integrations.object_storage import MemoryObjectStorage
 from app.main import create_app
 from app.persistence import models  # noqa: F401
 from app.persistence.database import Base, get_session
 from app.services.analysis_events import NullEventPublisher
 from app.services.analysis_queue import RecordingDispatcher
+from app.services.artifact_queue import RecordingExportDispatcher, RecordingReceiptDispatcher
 
 
 @pytest.fixture
@@ -53,15 +60,24 @@ async def database_app() -> AsyncIterator[FastAPI]:
     # No test may reach a broker. The dispatcher records instead of queueing, so
     # a test that forgets to run the pipeline sees a queued run, not a hang.
     dispatcher = RecordingDispatcher()
+    receipt_dispatcher = RecordingReceiptDispatcher()
+    export_dispatcher = RecordingExportDispatcher()
+    object_storage = MemoryObjectStorage()
 
     app = create_app()
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_auth_rate_limiter] = NoopRateLimiter
     app.dependency_overrides[get_analysis_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[get_receipt_dispatcher] = lambda: receipt_dispatcher
+    app.dependency_overrides[get_export_dispatcher] = lambda: export_dispatcher
+    app.dependency_overrides[get_object_storage] = lambda: object_storage
     app.state.test_session_factory = session_factory
     app.state.test_settings = settings
     app.state.test_dispatcher = dispatcher
+    app.state.test_receipt_dispatcher = receipt_dispatcher
+    app.state.test_export_dispatcher = export_dispatcher
+    app.state.test_object_storage = object_storage
     app.state.test_publisher = NullEventPublisher()
     app.state.test_evidence_provider = None
     app.state.test_oasis_adapter = None

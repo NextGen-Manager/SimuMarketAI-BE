@@ -40,9 +40,11 @@ class Settings(BaseSettings):
     celery_result_backend: str = ""
     celery_task_always_eager: bool = False
     celery_analysis_queue: str = "analysis"
+    celery_artifact_queue: str = "artifacts"
     celery_analysis_soft_time_limit_seconds: int = 600
     celery_analysis_time_limit_seconds: int = 900
     celery_analysis_max_retries: int = 3
+    celery_artifact_max_retries: int = 2
 
     # --- Stuck-run recovery ---------------------------------------------
     # A worker holds a lease while it executes a run and renews it at every
@@ -72,6 +74,24 @@ class Settings(BaseSettings):
     oasis_retry_limit: int = 1
     oasis_trace_root: str = "var/oasis-traces"
     oasis_trace_retention_days: int = 30
+
+    # --- Private object storage, receipt OCR, and exports ---------------
+    object_storage_provider: Literal["s3", "memory"] = "s3"
+    object_storage_endpoint_url: str = "http://localhost:9000"
+    object_storage_public_endpoint_url: str = ""
+    object_storage_region: str = "us-east-1"
+    object_storage_bucket: str = "simumarket-private"
+    object_storage_access_key: str = "simumarket"
+    object_storage_secret_key: str = "development-object-storage-secret"
+    object_storage_signed_url_seconds: int = 600
+    receipt_max_size_bytes: int = 10 * 1024 * 1024
+    receipt_max_pixels: int = 24_000_000
+    receipt_image_retention_days: int = 30
+    receipt_ocr_provider: Literal["paddle", "unavailable"] = "paddle"
+    receipt_ocr_engine_version: str = "PP-StructureV3"
+    receipt_preprocessing_version: str = "receipt-image-v1"
+    export_retention_days: int = 7
+    retention_interval_seconds: int = 3600
 
     # --- SSE ------------------------------------------------------------
     sse_heartbeat_seconds: int = 15
@@ -132,6 +152,14 @@ class Settings(BaseSettings):
             )
         if self.analysis_max_attempts < 1:
             raise ValueError("ANALYSIS_MAX_ATTEMPTS minimal 1")
+        return self
+
+    @model_validator(mode="after")
+    def validate_artifact_settings(self) -> "Settings":
+        if self.object_storage_signed_url_seconds < 60:
+            raise ValueError("OBJECT_STORAGE_SIGNED_URL_SECONDS minimal 60")
+        if self.environment in {"staging", "production"} and self.object_storage_provider != "s3":
+            raise ValueError("Object storage S3-compatible wajib dipakai di staging/production")
         return self
 
 

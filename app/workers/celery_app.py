@@ -26,7 +26,7 @@ def create_celery_app() -> Celery:
         # `include` defers the import to finalisation. Autodiscovery with
         # `force=True` would import the task module here, while this one is
         # still initialising, and the task module imports `celery_app` back.
-        include=["app.workers.analysis"],
+        include=["app.workers.analysis", "app.workers.artifacts"],
     )
     app.conf.update(
         task_default_queue=settings.celery_analysis_queue,
@@ -53,7 +53,12 @@ def create_celery_app() -> Celery:
                 "task": "analysis.recover",
                 "schedule": float(settings.analysis_recovery_interval_seconds),
                 "options": {"queue": settings.celery_analysis_queue},
-            }
+            },
+            "artifact-retention": {
+                "task": "artifacts.retention",
+                "schedule": float(settings.retention_interval_seconds),
+                "options": {"queue": settings.celery_artifact_queue},
+            },
         },
     )
     return app

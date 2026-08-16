@@ -75,6 +75,21 @@ class ConflictError(AppError):
     message = "Data tersebut sudah digunakan."
 
 
+class ReceiptDraftVersionError(ConflictError):
+    code = "RECEIPT_DRAFT_VERSION_CONFLICT"
+    message = "Draft struk telah berubah. Muat ulang sebelum menyimpan koreksi."
+
+
+class ReceiptTotalMismatchError(ConflictError):
+    code = "RECEIPT_TOTAL_MISMATCH_CONFIRMATION_REQUIRED"
+    message = "Jumlah item berbeda dari total struk. Konfirmasikan selisih untuk melanjutkan."
+
+
+class ReceiptUploadError(AppError):
+    code = "RECEIPT_UPLOAD_INVALID"
+    message = "Foto struk tidak valid atau belum selesai diunggah."
+
+
 class EducationGateError(AppError):
     """F-09: education prerequisites are enforced at the API, not just in the UI."""
 

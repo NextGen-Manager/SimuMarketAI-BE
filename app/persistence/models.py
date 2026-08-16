@@ -154,6 +154,9 @@ class Transaction(Base):
     gross_total_idr: Mapped[int] = mapped_column(BigInteger)
     source: Mapped[str] = mapped_column(String(16), default="manual")
     client_reference: Mapped[str | None] = mapped_column(String(120))
+    receipt_import_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("receipt_imports.id", ondelete="SET NULL"), unique=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -503,3 +506,146 @@ class AuditEvent(Base):
     correlation_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ReceiptImport(Base):
+    __tablename__ = "receipt_imports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('created', 'uploading', 'queued', 'preprocessing', 'extracting', "
+            "'ready_for_review', 'confirmed', 'committed', 'failed', 'cancelled')",
+            name="ck_receipt_import_status",
+        ),
+        Index("ix_receipt_imports_user_status_created", "user_id", "status", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    business_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_profiles.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="created")
+    object_key: Mapped[str] = mapped_column(String(500), unique=True)
+    original_file_name: Mapped[str] = mapped_column(String(255))
+    sha256: Mapped[str] = mapped_column(String(64))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    upload_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    image_retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_transaction_id: Mapped[UUID | None] = mapped_column(Uuid)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OcrAttempt(Base):
+    __tablename__ = "ocr_attempts"
+    __table_args__ = (
+        UniqueConstraint("receipt_import_id", "attempt_number", name="uq_ocr_attempt_number"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    receipt_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("receipt_imports.id", ondelete="CASCADE"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    engine_version: Mapped[str] = mapped_column(String(80))
+    preprocessing_version: Mapped[str] = mapped_column(String(80))
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    raw_text_object_key: Mapped[str | None] = mapped_column(String(500))
+    structured_extraction: Mapped[dict[str, object] | None] = mapped_column(JsonType)
+    confidence_bps: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ReceiptDraft(Base):
+    __tablename__ = "receipt_drafts"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    receipt_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("receipt_imports.id", ondelete="CASCADE"), unique=True
+    )
+    merchant_name: Mapped[str | None] = mapped_column(String(180))
+    merchant_confidence_bps: Mapped[int | None] = mapped_column(Integer)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    occurred_at_confidence_bps: Mapped[int | None] = mapped_column(Integer)
+    subtotal_idr: Mapped[int | None] = mapped_column(BigInteger)
+    tax_idr: Mapped[int | None] = mapped_column(BigInteger)
+    service_idr: Mapped[int | None] = mapped_column(BigInteger)
+    discount_idr: Mapped[int | None] = mapped_column(BigInteger)
+    total_idr: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_confidence_bps: Mapped[int | None] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3), default="IDR")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class ReceiptDraftItem(Base):
+    __tablename__ = "receipt_draft_items"
+    __table_args__ = (
+        UniqueConstraint("receipt_draft_id", "position", name="uq_receipt_draft_item_position"),
+        CheckConstraint("quantity > 0", name="ck_receipt_draft_item_quantity_positive"),
+        CheckConstraint("unit_price_idr >= 0", name="ck_receipt_draft_item_price_non_negative"),
+        CheckConstraint("line_total_idr >= 0", name="ck_receipt_draft_item_total_non_negative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    receipt_draft_id: Mapped[UUID] = mapped_column(
+        ForeignKey("receipt_drafts.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    raw_name: Mapped[str] = mapped_column(String(180))
+    normalized_name: Mapped[str] = mapped_column(String(180))
+    matched_product_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL")
+    )
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price_idr: Mapped[int] = mapped_column(BigInteger)
+    line_total_idr: Mapped[int] = mapped_column(BigInteger)
+    confidence_bps: Mapped[int | None] = mapped_column(Integer)
+    corrected: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ExportArtifact(Base):
+    __tablename__ = "export_artifacts"
+    __table_args__ = (
+        UniqueConstraint("requested_by_user_id", "idempotency_key", name="uq_export_user_key"),
+        CheckConstraint(
+            "kind IN ('analysis_report', 'transaction_summary')", name="ck_export_kind"
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'processing', 'ready', 'failed', 'expired')",
+            name="ck_export_status",
+        ),
+        Index("ix_export_artifacts_status_retention", "status", "retention_until"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    requested_by_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    business_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_profiles.id", ondelete="CASCADE"), index=True
+    )
+    analysis_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="queued")
+    request_snapshot: Mapped[dict[str, object]] = mapped_column(JsonType)
+    object_key: Mapped[str | None] = mapped_column(String(500), unique=True)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    idempotency_key: Mapped[str] = mapped_column(String(120))
+    retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -16,6 +16,9 @@ dependencies = [
     "pwdlib[argon2]>=0.3,<1",
     "pyjwt>=2.10,<3",
     "email-validator>=2.2,<3",
+    "boto3>=1.40,<2",
+    "pillow>=10.1,<11",
+    "reportlab>=4.4,<5",
 ]
 
 # The OASIS runtime is an extra, not a default dependency. `camel-oasis` pins
@@ -34,6 +37,10 @@ oasis = [
     # CAMEL 0.2.78 imports FastMCP from the MCP 1.x module layout. MCP 2.x
     # resolves successfully but fails at worker import time.
     "mcp<2",
+]
+ocr = [
+    "paddleocr[doc-parser]>=3.3,<4",
+    "paddlepaddle>=3.2,<4",
 ]
 
 [dependency-groups]
@@ -82,7 +89,14 @@ ignore_missing_imports = true
 # camel-oasis lives in the isolated spike environment, not in the backend
 # lockfile, so the live adapter imports it lazily and mypy cannot see stubs.
 [[tool.mypy.overrides]]
-module = ["oasis.*", "camel.*"]
+module = [
+    "oasis.*",
+    "camel.*",
+    "boto3.*",
+    "botocore.*",
+    "paddleocr.*",
+    "reportlab.*",
+]
 ignore_missing_imports = true
 
 # Celery's task decorator is untyped upstream; the task body itself stays typed.
