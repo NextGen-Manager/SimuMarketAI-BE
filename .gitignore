@@ -21,3 +21,13 @@ uploads/
 exports/
 # Default OASIS_TRACE_ROOT. One directory per run, holding the interaction trace.
 var/
+
+# Local quality and build outputs.
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.log
+*.dump
+celerybeat-schedule*
