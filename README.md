@@ -29,7 +29,7 @@ jalur aplikasi.
 - PostgreSQL
 - Redis + Celery
 - `camel-oasis` / CAMEL-AI
-- Google Gemini melalui model adapter CAMEL, dengan provider fallback di belakang interface internal
+- Google Gemini atau OpenAI melalui model adapter CAMEL, dipilih per deployment
 
 OASIS `0.2.5` pada branch utama yang diaudit mensyaratkan Python `>=3.10,<3.12`, sehingga Python 3.11 sesuai. Versi dependency harus dipin dan diuji ulang sebelum implementasi.
 
@@ -103,5 +103,6 @@ uv run mypy app
 uv run pytest
 ```
 
-Jangan mengisi atau melakukan commit terhadap `.env`. Kredensial provider baru
-dibutuhkan ketika spike OASIS dijalankan.
+Jangan mengisi atau melakukan commit terhadap `.env`. Pilih provider dan model
+melalui `OASIS_PROVIDER` serta `OASIS_MODEL_ID`. Isi hanya `GEMINI_API_KEY` atau
+`OPENAI_API_KEY` milik provider yang dipilih ketika integrasi live dijalankan.

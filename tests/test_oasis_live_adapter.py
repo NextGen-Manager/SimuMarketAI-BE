@@ -11,9 +11,8 @@ The round protocol itself is *not* tested here. It lives in
 covered by `test_oasis_protocol.py` with a deterministic runtime. What remains in
 this module is only the binding to `camel-oasis`.
 
-Nothing in this file has been run against Gemini. `GEMINI_API_KEY` was not
-available while Phase 4 was implemented, so the live integration and the Phase 0
-benchmark in `Docs/docs/14` both remain open.
+Live provider verification remains separate from deterministic CI. It requires
+an explicitly selected provider, matching model, and corresponding API key.
 """
 
 from __future__ import annotations
@@ -51,8 +50,11 @@ LIVE_SKIP_REASON = (
     "GEMINI_API_KEY tidak tersedia; run live OASIS dan benchmark Fase 0 belum dijalankan."
 )
 
-requires_live_provider = pytest.mark.skipif(
-    not os.getenv("GEMINI_API_KEY"), reason=LIVE_SKIP_REASON
+requires_live_gemini = pytest.mark.skipif(not os.getenv("GEMINI_API_KEY"), reason=LIVE_SKIP_REASON)
+
+requires_live_openai = pytest.mark.skipif(
+    not os.getenv("OPENAI_API_KEY"),
+    reason="OPENAI_API_KEY tidak tersedia; run live OASIS OpenAI belum dijalankan.",
 )
 
 
@@ -246,6 +248,7 @@ async def test_social_actions_honor_concurrency_and_record_exposure(tmp_path: Pa
     runtime = CamelCouncilRuntime(
         api_key="unused",
         model_id="gemini-3.1-flash-lite",
+        provider="gemini",
         request=request,
         manifest=manifest,
         roster=build_roster(request),
@@ -293,7 +296,11 @@ async def test_an_existing_trace_path_is_refused(tmp_path: Path) -> None:
         evidence_snapshot_version="evidence-snapshot-fixture-v1",
         snapshot_hash="0" * 64,
     )
-    adapter = LiveOasisAdapter(api_key="unused", model_id="gemini-3.1-flash-lite")
+    adapter = LiveOasisAdapter(
+        api_key="unused",
+        model_id="gemini-3.1-flash-lite",
+        provider="gemini",
+    )
 
     with pytest.raises(OasisUnavailableError):
         await adapter.simulate(
@@ -314,7 +321,7 @@ def test_a_missing_package_degrades_instead_of_crashing_the_import() -> None:
     assert live.LiveOasisAdapter.is_fake is False
 
 
-@requires_live_provider
+@requires_live_gemini
 async def test_live_four_agent_run_against_gemini() -> None:
     """Not executed. Recorded so the gap is visible rather than assumed closed.
 
@@ -326,7 +333,13 @@ async def test_live_four_agent_run_against_gemini() -> None:
     pytest.fail("Live run harness belum ditulis; jangan mengklaim hasil yang belum diukur.")
 
 
-@requires_live_provider
+@requires_live_gemini
 def test_live_benchmark_numbers_are_recorded() -> None:
     """Not executed. Phase 0 exit criteria stay open until this runs for real."""
     pytest.fail("Benchmark Gemini belum dijalankan; angka tidak boleh dikarang.")
+
+
+@requires_live_openai
+async def test_live_four_agent_run_against_openai() -> None:
+    """Kept open until the same live harness is verified with OpenAI."""
+    pytest.fail("Live run OpenAI belum dijalankan; hasil tidak boleh diasumsikan.")

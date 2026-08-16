@@ -3,7 +3,7 @@
 Everything about *what* happens in a run — the round order, the activation
 policy, the budget, the counting — lives in `orchestrator.py` and is exercised
 in CI. This module is only the translation layer: OASIS agents, the Reddit
-platform, the trace database, and CAMEL's Gemini backend.
+platform, the trace database, and CAMEL's selected model backend.
 
 Why each call is the one it is, against the OASIS 0.2.5 source:
 
@@ -24,11 +24,8 @@ are therefore lazy, and a missing package becomes `OasisUnavailableError` — th
 same honest `partial` as a missing API key, not an import-time crash that would
 take the API down with it.
 
-This binding has never been executed against a real provider: `GEMINI_API_KEY`
-was not available while it was written. It is typed and written against the
-installed 0.2.5 source, but "it runs" is not something anybody has observed, and
-`tests/test_oasis_live_adapter.py` skips with that reason rather than asserting
-behaviour nobody has seen.
+Live provider verification remains separate from deterministic CI and requires
+an explicitly selected provider, matching model, and corresponding API key.
 """
 
 from __future__ import annotations
@@ -59,6 +56,7 @@ from app.integrations.oasis.council_runtime import (
 from app.integrations.oasis.orchestration_support import build_roster
 from app.integrations.oasis.orchestrator import CouncilOrchestrator
 from app.integrations.oasis.prompts import PROFILE_VERSION, CouncilMember
+from app.integrations.oasis.providers import OasisProvider, resolve_model_platform
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +128,14 @@ class CamelCouncilRuntime:
         *,
         api_key: str,
         model_id: str,
+        provider: OasisProvider,
         request: SimulationRequest,
         manifest: RunManifest,
         roster: tuple[tuple[AgentRole, CouncilMember], ...],
     ) -> None:
         self._api_key = api_key
         self._model_id = model_id
+        self._provider = provider
         self._request = request
         self._manifest = manifest
         self._roster = roster
@@ -177,7 +177,7 @@ class CamelCouncilRuntime:
         )
 
         model = ModelFactory.create(
-            model_platform=ModelPlatformType.GEMINI,
+            model_platform=resolve_model_platform(self._provider, ModelPlatformType),
             model_type=self._model_id,
             model_config_dict={
                 "temperature": 0,
@@ -360,7 +360,13 @@ class LiveOasisAdapter:
     adapter_id = "oasis-live"
     is_fake = False
 
-    def __init__(self, *, api_key: str, model_id: str, provider: str = "gemini") -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model_id: str,
+        provider: OasisProvider,
+    ) -> None:
         self._api_key = api_key
         self._model_id = model_id
         self._provider = provider
@@ -376,6 +382,7 @@ class LiveOasisAdapter:
         runtime = CamelCouncilRuntime(
             api_key=self._api_key,
             model_id=self._model_id,
+            provider=self._provider,
             request=request,
             manifest=manifest,
             roster=roster,

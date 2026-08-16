@@ -15,6 +15,7 @@ from __future__ import annotations
 from app.core.config import Settings
 from app.domain.agents import OasisAdapter
 from app.integrations.oasis.fake import FakeOasisAdapter
+from app.integrations.oasis.providers import resolve_provider
 from app.integrations.oasis.unavailable import UnavailableOasisAdapter
 
 PROTECTED_ENVIRONMENTS = frozenset({"staging", "production"})
@@ -40,7 +41,8 @@ def select_oasis_adapter(
 
     if not settings.oasis_enabled:
         return UnavailableOasisAdapter(DISABLED_REASON)
-    if not settings.gemini_api_key:
+    selection = resolve_provider(settings)
+    if not selection.api_key:
         return UnavailableOasisAdapter(NO_API_KEY_REASON)
 
     # Imported lazily: `camel-oasis` is not installed in the default backend
@@ -49,9 +51,9 @@ def select_oasis_adapter(
     from app.integrations.oasis.live import LiveOasisAdapter
 
     return LiveOasisAdapter(
-        api_key=settings.gemini_api_key,
-        model_id=settings.oasis_model_id,
-        provider=settings.oasis_provider,
+        api_key=selection.api_key,
+        model_id=selection.model_id,
+        provider=selection.provider,
     )
 
 
