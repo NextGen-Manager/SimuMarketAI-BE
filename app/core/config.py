@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     )
 
     gemini_api_key: str = ""
+    openai_api_key: str = ""
 
     # --- Celery ---------------------------------------------------------
     # Broker and result backend default to the same Redis as the cache. Redis is
@@ -58,7 +59,7 @@ class Settings(BaseSettings):
 
     # --- OASIS ----------------------------------------------------------
     oasis_enabled: bool = True
-    oasis_provider: str = "gemini"
+    oasis_provider: Literal["gemini", "openai"] = "gemini"
     oasis_model_id: str = "gemini-3.1-flash-lite"
     oasis_package_version: str = "0.2.5"
     camel_package_version: str = "0.2.78"
@@ -138,6 +139,12 @@ class Settings(BaseSettings):
         # every comparison recorded against a run manifest.
         if "-preview" in self.oasis_model_id:
             raise ValueError("Model berlabel -preview tidak boleh dipakai pada jalur demo")
+        required_prefix = {"gemini": "gemini-", "openai": "gpt-"}[self.oasis_provider]
+        if not self.oasis_model_id.startswith(required_prefix):
+            raise ValueError(
+                "OASIS_MODEL_ID tidak cocok dengan OASIS_PROVIDER; "
+                f"model {self.oasis_provider} harus memakai prefix {required_prefix}"
+            )
         if not 12 <= self.oasis_cohort_size <= 24:
             raise ValueError("OASIS_COHORT_SIZE harus berada di rentang 12 sampai 24")
         return self

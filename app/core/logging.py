@@ -16,6 +16,7 @@ REDACTED_KEYS = frozenset(
         "authorization",
         "api_key",
         "gemini_api_key",
+        "openai_api_key",
         "prompt",
     }
 )
@@ -33,7 +34,7 @@ class JsonFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key in payload or key.startswith("_") or key in logging.LogRecord.__dict__:
                 continue
-            if key in REDACTED_KEYS:
+            if key.lower() in REDACTED_KEYS:
                 continue
             if isinstance(value, str | int | float | bool | type(None)):
                 payload[key] = value
